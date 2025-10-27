@@ -1,0 +1,981 @@
+"""
+Advanced Inspection Window - With image comparison and gradient edge detection
+"""
+
+import sys
+import os
+import csv
+import cv2
+import numpy as np
+from datetime import datetime
+from typing import Optional, Dict, Any, Tuple
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
+                            QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy,
+                            QGroupBox, QSlider, QCheckBox, QLineEdit, QTextEdit,
+                            QProgressBar, QMessageBox, QComboBox, QScrollArea)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, pyqtSlot
+from PyQt5.QtGui import QPixmap, QFont, QImage
+import threading
+
+
+class ImageProcessor:
+    """Class for handling image processing operations"""
+    
+    @staticmethod
+    def compute_gradient(image):
+        """Compute gradient magnitude using Sobel operators"""
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # Compute gradients
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Compute gradient magnitude
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        gradient_magnitude = np.uint8(np.clip(gradient_magnitude, 0, 255))
+        
+        return gradient_magnitude
+    
+    @staticmethod
+    def create_difference_overlay(current_grad, reference_grad, mask=None):
+        """Create overlay highlighting differences between gradient images"""
+        # Ensure both images are the same size
+        if current_grad.shape != reference_grad.shape:
+            reference_grad = cv2.resize(reference_grad, (current_grad.shape[1], current_grad.shape[0]))
+        
+        # Compute absolute difference
+        diff = cv2.absdiff(current_grad, reference_grad)
+        
+        # Apply mask if provided
+        if mask is not None:
+            if mask.shape != diff.shape:
+                mask = cv2.resize(mask, (diff.shape[1], diff.shape[0]))
+            if len(mask.shape) == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            diff = cv2.bitwise_and(diff, diff, mask=mask)
+        
+        # Create colored overlay
+        # Red channel for differences
+        overlay = np.zeros((diff.shape[0], diff.shape[1], 3), dtype=np.uint8)
+        overlay[:, :, 2] = diff  # Red channel for differences
+        overlay[:, :, 1] = reference_grad // 3  # Green channel for reference (dimmed)
+        overlay[:, :, 0] = current_grad // 3   # Blue channel for current (dimmed)
+        
+        return overlay, diff
+    
+    @staticmethod
+    def concatenate_frames(original, processed):
+        """Concatenate original and processed frames horizontally"""
+        # Ensure both images have the same height
+        h1, w1 = original.shape[:2]
+        h2, w2 = processed.shape[:2]
+        
+        target_height = min(h1, h2)
+        
+        # Resize if needed
+        if h1 != target_height:
+            original = cv2.resize(original, (int(w1 * target_height / h1), target_height))
+        if h2 != target_height:
+            processed = cv2.resize(processed, (int(w2 * target_height / h2), target_height))
+        
+        # Concatenate horizontally
+        concatenated = np.hstack((original, processed))
+        return concatenated
+
+
+class CameraThread(QThread):
+    """Thread for handling camera operations with image processing"""
+    frame_ready = pyqtSignal(np.ndarray)
+    processed_ready = pyqtSignal(np.ndarray, np.ndarray, np.ndarray)  # original, processed, concatenated
+    
+    def __init__(self):
+        super().__init__()
+        self.camera = None
+        self.running = False
+        self.flip_horizontal = False
+        self.flip_vertical = False
+        self.exposure = 0
+        self.white_balance = 5000
+        self.current_side = "Front"
+        self.reference_images = {}
+        self.mask_images = {}
+        self.processor = ImageProcessor()
+        self.load_reference_images()
+        
+    def load_reference_images(self):
+        """Load reference images and masks for each side"""
+        try:
+            # Get reference images directory
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))
+            ref_dir = os.path.join(project_root, "data", "reference_images")
+            mask_dir = os.path.join(project_root, "data", "mask_images")
+            
+            # Create directories if they don't exist
+            os.makedirs(ref_dir, exist_ok=True)
+            os.makedirs(mask_dir, exist_ok=True)
+            
+            sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+            
+            for side in sides:
+                # Load reference image
+                ref_path = os.path.join(ref_dir, f"{side.lower()}_reference.jpg")
+                mask_path = os.path.join(mask_dir, f"{side.lower()}_mask.jpg")
+                
+                if os.path.exists(ref_path):
+                    ref_img = cv2.imread(ref_path)
+                    if ref_img is not None:
+                        self.reference_images[side] = ref_img
+                        print(f"Loaded reference image for {side}")
+                else:
+                    # Create a placeholder reference image
+                    placeholder = np.ones((480, 640, 3), dtype=np.uint8) * 128
+                    cv2.putText(placeholder, f"{side} Reference", (200, 240), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    self.reference_images[side] = placeholder
+                    print(f"Created placeholder reference for {side}")
+                
+                if os.path.exists(mask_path):
+                    mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    if mask_img is not None:
+                        self.mask_images[side] = mask_img
+                        print(f"Loaded mask image for {side}")
+                else:
+                    # Create a placeholder mask (full white = inspect entire image)
+                    mask_placeholder = np.ones((480, 640), dtype=np.uint8) * 255
+                    self.mask_images[side] = mask_placeholder
+                    print(f"Created placeholder mask for {side}")
+                    
+        except Exception as e:
+            print(f"Error loading reference images: {e}")
+    
+    def set_current_side(self, side):
+        """Set the current inspection side"""
+        self.current_side = side
+    
+    def start_camera(self, camera_id=0):
+        """Start camera capture"""
+        try:
+            self.camera = cv2.VideoCapture(camera_id)
+            if self.camera and self.camera.isOpened():
+                # Set camera properties
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+                
+                self.running = True
+                self.start()
+                return True
+            else:
+                if self.camera:
+                    self.camera.release()
+                return False
+        except Exception as e:
+            print(f"Camera start error: {e}")
+            return False
+    
+    def stop_camera(self):
+        """Stop camera capture"""
+        self.running = False
+        if self.camera:
+            try:
+                self.camera.release()
+            except:
+                pass
+            self.camera = None
+        if self.isRunning():
+            self.quit()
+            self.wait(3000)
+    
+    def update_settings(self, flip_h=False, flip_v=False, exposure=0, wb=5000):
+        """Update camera settings"""
+        self.flip_horizontal = flip_h
+        self.flip_vertical = flip_v
+        self.exposure = exposure
+        self.white_balance = wb
+        
+        if self.camera:
+            try:
+                self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
+            except:
+                pass
+    
+    def run(self):
+        """Main camera loop with image processing"""
+        while self.running and self.camera and self.camera.isOpened():
+            try:
+                ret, frame = self.camera.read()
+                if ret:
+                    # Apply transformations
+                    if self.flip_horizontal and self.flip_vertical:
+                        frame = cv2.flip(frame, -1)
+                    elif self.flip_horizontal:
+                        frame = cv2.flip(frame, 1)
+                    elif self.flip_vertical:
+                        frame = cv2.flip(frame, 0)
+                    
+                    # Process frame with current side reference
+                    processed_frame, concatenated_frame = self.process_frame(frame)
+                    
+                    # Emit signals
+                    self.frame_ready.emit(frame)
+                    self.processed_ready.emit(frame, processed_frame, concatenated_frame)
+                else:
+                    break
+            except Exception as e:
+                print(f"Camera processing error: {e}")
+                break
+            self.msleep(33)  # ~30 FPS
+    
+    def process_frame(self, frame):
+        """Process frame with gradient comparison"""
+        try:
+            # Get current gradient
+            current_gradient = self.processor.compute_gradient(frame)
+            
+            # Get reference data for current side
+            if self.current_side in self.reference_images:
+                reference_img = self.reference_images[self.current_side]
+                reference_gradient = self.processor.compute_gradient(reference_img)
+                
+                mask = self.mask_images.get(self.current_side, None)
+                
+                # Create difference overlay
+                overlay, diff = self.processor.create_difference_overlay(
+                    current_gradient, reference_gradient, mask
+                )
+                
+                # Concatenate original and processed
+                concatenated = self.processor.concatenate_frames(frame, overlay)
+                
+                return overlay, concatenated
+            else:
+                # No reference available, just return gradient
+                gradient_3ch = cv2.cvtColor(current_gradient, cv2.COLOR_GRAY2BGR)
+                concatenated = self.processor.concatenate_frames(frame, gradient_3ch)
+                return gradient_3ch, concatenated
+                
+        except Exception as e:
+            print(f"Frame processing error: {e}")
+            # Return original frame if processing fails
+            concatenated = np.hstack((frame, frame))
+            return frame, concatenated
+
+
+class AdvancedInspectionWindow(QWidget):
+    """Advanced inspection window with image comparison"""
+    
+    inspection_complete = pyqtSignal(dict)
+    window_closed = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__()
+        self.parent_window = parent
+        self.barcode = ""
+        self.current_side = 0
+        self.inspection_sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+        self.inspection_results = {}
+        self.inspection_start_time = None
+        self.side_start_time = None
+        self.camera_thread = CameraThread()
+        self.init_ui()
+        self.setup_camera()
+        
+    def init_ui(self):
+        """Initialize the inspection interface"""
+        self.setWindowTitle("AI VDI System - Advanced Inspection")
+        self.showFullScreen()
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #f0f0f0;
+                font-family: Arial;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                border: none;
+                color: white;
+                padding: 15px 25px;
+                font-size: 16px;
+                border-radius: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+            QPushButton#stopButton {
+                background-color: #f44336;
+            }
+            QPushButton#stopButton:hover {
+                background-color: #da190b;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #cccccc;
+                border-radius: 8px;
+                margin-top: 15px;
+                padding-top: 15px;
+                font-size: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 10px 0 10px;
+            }
+            QLineEdit {
+                padding: 12px;
+                border: 2px solid #ddd;
+                border-radius: 6px;
+                font-size: 16px;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+        """)
+        
+        # Main layout
+        main_layout = QHBoxLayout()
+        self.setLayout(main_layout)
+        
+        # Left panel - Controls
+        self.create_control_panel(main_layout)
+        
+        # Center panel - Camera feed with comparison
+        self.create_camera_panel(main_layout)
+        
+        # Right panel - Inspection progress and results
+        self.create_inspection_panel(main_layout)
+    
+    def create_control_panel(self, main_layout):
+        """Create the control panel on the left"""
+        control_panel = QFrame()
+        control_panel.setFixedWidth(350)
+        control_panel.setStyleSheet("QFrame { border: 2px solid #ccc; border-radius: 10px; background-color: white; }")
+        control_layout = QVBoxLayout()
+        control_panel.setLayout(control_layout)
+        
+        # Title
+        title = QLabel("Control Panel")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #2c3e50; margin: 15px;")
+        control_layout.addWidget(title)
+        
+        # Barcode section
+        self.create_barcode_section(control_layout)
+        
+        # Camera settings section
+        self.create_camera_settings(control_layout)
+        
+        # Inspection controls
+        self.create_inspection_controls(control_layout)
+        
+        # Add spacer
+        control_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        
+        main_layout.addWidget(control_panel)
+    
+    def create_barcode_section(self, layout):
+        """Create barcode input section"""
+        barcode_group = QGroupBox("Barcode Input")
+        barcode_layout = QVBoxLayout()
+        barcode_group.setLayout(barcode_layout)
+        
+        # Manual barcode input
+        self.barcode_input = QLineEdit()
+        self.barcode_input.setPlaceholderText("Enter barcode manually")
+        barcode_layout.addWidget(self.barcode_input)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        self.scan_qr_button = QPushButton("Scan QR")
+        self.scan_qr_button.clicked.connect(self.scan_qr_code)
+        button_layout.addWidget(self.scan_qr_button)
+        
+        self.submit_barcode_button = QPushButton("Submit")
+        self.submit_barcode_button.clicked.connect(self.submit_barcode)
+        button_layout.addWidget(self.submit_barcode_button)
+        
+        barcode_layout.addLayout(button_layout)
+        
+        # Barcode display
+        self.barcode_display = QLabel("No barcode entered")
+        self.barcode_display.setStyleSheet("background-color: #f8f9fa; padding: 8px; border: 2px solid #ddd; border-radius: 5px;")
+        barcode_layout.addWidget(self.barcode_display)
+        
+        layout.addWidget(barcode_group)
+    
+    def create_camera_settings(self, layout):
+        """Create camera settings section"""
+        camera_group = QGroupBox("Camera Settings")
+        camera_layout = QVBoxLayout()
+        camera_group.setLayout(camera_layout)
+        
+        # Flip settings
+        self.flip_horizontal = QCheckBox("Flip Horizontal")
+        self.flip_horizontal.toggled.connect(self.update_camera_settings)
+        camera_layout.addWidget(self.flip_horizontal)
+        
+        self.flip_vertical = QCheckBox("Flip Vertical")
+        self.flip_vertical.toggled.connect(self.update_camera_settings)
+        camera_layout.addWidget(self.flip_vertical)
+        
+        # Exposure
+        exposure_label = QLabel("Exposure:")
+        camera_layout.addWidget(exposure_label)
+        self.exposure_slider = QSlider(Qt.Horizontal)
+        self.exposure_slider.setRange(-10, 10)
+        self.exposure_slider.setValue(0)
+        self.exposure_slider.valueChanged.connect(self.update_camera_settings)
+        camera_layout.addWidget(self.exposure_slider)
+        
+        # White balance
+        wb_label = QLabel("White Balance:")
+        camera_layout.addWidget(wb_label)
+        self.wb_slider = QSlider(Qt.Horizontal)
+        self.wb_slider.setRange(2000, 8000)
+        self.wb_slider.setValue(5000)
+        self.wb_slider.valueChanged.connect(self.update_camera_settings)
+        camera_layout.addWidget(self.wb_slider)
+        
+        layout.addWidget(camera_group)
+    
+    def create_inspection_controls(self, layout):
+        """Create inspection control buttons"""
+        control_group = QGroupBox("Inspection Controls")
+        control_layout = QVBoxLayout()
+        control_group.setLayout(control_layout)
+        
+        self.start_inspection_button = QPushButton("Start Inspection")
+        self.start_inspection_button.clicked.connect(self.start_inspection)
+        self.start_inspection_button.setEnabled(False)
+        control_layout.addWidget(self.start_inspection_button)
+        
+        self.capture_button = QPushButton("Capture & Analyze")
+        self.capture_button.clicked.connect(self.capture_and_analyze)
+        self.capture_button.setEnabled(False)
+        control_layout.addWidget(self.capture_button)
+        
+        self.next_side_button = QPushButton("Next Side")
+        self.next_side_button.clicked.connect(self.next_side)
+        self.next_side_button.setEnabled(False)
+        control_layout.addWidget(self.next_side_button)
+        
+        self.manual_override_button = QPushButton("Manual Override")
+        self.manual_override_button.clicked.connect(self.manual_override)
+        self.manual_override_button.setEnabled(False)
+        control_layout.addWidget(self.manual_override_button)
+        
+        self.stop_inspection_button = QPushButton("Stop Inspection")
+        self.stop_inspection_button.setObjectName("stopButton")
+        self.stop_inspection_button.clicked.connect(self.stop_inspection)
+        self.stop_inspection_button.setEnabled(False)
+        control_layout.addWidget(self.stop_inspection_button)
+        
+        # Back to main menu button
+        self.back_button = QPushButton("Back to Main Menu")
+        self.back_button.setObjectName("stopButton")
+        self.back_button.clicked.connect(self.back_to_main)
+        control_layout.addWidget(self.back_button)
+        
+        layout.addWidget(control_group)
+    
+    def create_camera_panel(self, main_layout):
+        """Create camera display panel with comparison view"""
+        camera_panel = QFrame()
+        camera_panel.setStyleSheet("QFrame { border: 2px solid #ccc; border-radius: 10px; background-color: white; }")
+        camera_layout = QVBoxLayout()
+        camera_panel.setLayout(camera_layout)
+        
+        # Title
+        camera_title = QLabel("Live Camera Feed with Edge Comparison")
+        camera_title.setFont(QFont("Arial", 16, QFont.Bold))
+        camera_title.setAlignment(Qt.AlignCenter)
+        camera_title.setStyleSheet("color: #2c3e50; margin: 10px;")
+        camera_layout.addWidget(camera_title)
+        
+        # Camera feed (concatenated view)
+        self.camera_label = QLabel("Camera Feed\n\nWaiting for camera...")
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setMinimumSize(1000, 500)
+        self.camera_label.setStyleSheet("""
+            background-color: #2c3e50; 
+            color: white; 
+            font-size: 18px; 
+            border-radius: 8px;
+            border: 2px solid #34495e;
+        """)
+        camera_layout.addWidget(self.camera_label)
+        
+        # Info labels
+        info_layout = QHBoxLayout()
+        
+        self.left_info = QLabel("Original Camera Feed")
+        self.left_info.setAlignment(Qt.AlignCenter)
+        self.left_info.setStyleSheet("color: #3498db; font-weight: bold;")
+        info_layout.addWidget(self.left_info)
+        
+        self.right_info = QLabel("Gradient Comparison with Reference")
+        self.right_info.setAlignment(Qt.AlignCenter)
+        self.right_info.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        info_layout.addWidget(self.right_info)
+        
+        camera_layout.addLayout(info_layout)
+        
+        # Camera status
+        self.camera_status = QLabel("Camera: Disconnected")
+        self.camera_status.setAlignment(Qt.AlignCenter)
+        self.camera_status.setStyleSheet("color: #e74c3c; font-size: 14px; margin: 5px;")
+        camera_layout.addWidget(self.camera_status)
+        
+        main_layout.addWidget(camera_panel)
+    
+    def create_inspection_panel(self, main_layout):
+        """Create inspection progress and results panel"""
+        inspection_panel = QFrame()
+        inspection_panel.setFixedWidth(350)
+        inspection_panel.setStyleSheet("QFrame { border: 2px solid #ccc; border-radius: 10px; background-color: white; }")
+        inspection_layout = QVBoxLayout()
+        inspection_panel.setLayout(inspection_layout)
+        
+        # Title
+        title = QLabel("Inspection Progress")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #2c3e50; margin: 15px;")
+        inspection_layout.addWidget(title)
+        
+        # Progress section
+        self.create_progress_section(inspection_layout)
+        
+        # Results section
+        self.create_results_section(inspection_layout)
+        
+        main_layout.addWidget(inspection_panel)
+    
+    def create_progress_section(self, layout):
+        """Create inspection progress section"""
+        progress_group = QGroupBox("Current Progress")
+        progress_layout = QVBoxLayout()
+        progress_group.setLayout(progress_layout)
+        
+        # Current side
+        self.current_side_label = QLabel("Current Side: Not Started")
+        self.current_side_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.current_side_label.setStyleSheet("color: #2c3e50; margin: 5px;")
+        progress_layout.addWidget(self.current_side_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, len(self.inspection_sides))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #bdc3c7;
+                border-radius: 5px;
+                text-align: center;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db;
+                border-radius: 3px;
+            }
+        """)
+        progress_layout.addWidget(self.progress_bar)
+        
+        # Side status
+        self.side_status_layout = QVBoxLayout()
+        for side in self.inspection_sides:
+            side_label = QLabel(f"{side}: Pending")
+            side_label.setStyleSheet("color: #666; padding: 3px; font-size: 12px;")
+            self.side_status_layout.addWidget(side_label)
+        progress_layout.addLayout(self.side_status_layout)
+        
+        layout.addWidget(progress_group)
+    
+    def create_results_section(self, layout):
+        """Create results display section"""
+        results_group = QGroupBox("Inspection Results")
+        results_layout = QVBoxLayout()
+        results_group.setLayout(results_layout)
+        
+        # Overall result
+        self.overall_result = QLabel("Overall: Pending")
+        self.overall_result.setFont(QFont("Arial", 14, QFont.Bold))
+        self.overall_result.setStyleSheet("color: #2c3e50; margin: 5px;")
+        results_layout.addWidget(self.overall_result)
+        
+        # Detailed results
+        scroll_area = QScrollArea()
+        scroll_widget = QWidget()
+        self.results_layout = QVBoxLayout()
+        scroll_widget.setLayout(self.results_layout)
+        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMaximumHeight(150)
+        results_layout.addWidget(scroll_area)
+        
+        # Time information
+        self.time_info = QLabel("Time: 00:00")
+        self.time_info.setStyleSheet("color: #7f8c8d; font-size: 12px; margin: 5px;")
+        results_layout.addWidget(self.time_info)
+        
+        layout.addWidget(results_group)
+    
+    def setup_camera(self):
+        """Setup camera connection"""
+        try:
+            if self.camera_thread.start_camera(0):
+                self.camera_thread.frame_ready.connect(self.update_camera_feed)
+                self.camera_thread.processed_ready.connect(self.update_processed_feed)
+                self.camera_status.setText("Camera: Connected")
+                self.camera_status.setStyleSheet("color: #27ae60; font-size: 14px; margin: 5px;")
+            else:
+                self.camera_status.setText("Camera: Failed to connect")
+                self.camera_status.setStyleSheet("color: #e74c3c; font-size: 14px; margin: 5px;")
+                self.camera_label.setText("Camera Not Available\n\nPlease check camera connection")
+        except Exception as e:
+            print(f"Camera setup error: {e}")
+            self.camera_status.setText("Camera: Error")
+            self.camera_status.setStyleSheet("color: #e74c3c; font-size: 14px; margin: 5px;")
+            self.camera_label.setText("Camera Error")
+    
+    @pyqtSlot(np.ndarray)
+    def update_camera_feed(self, frame):
+        """Update basic camera feed"""
+        pass  # We'll use the processed feed instead
+    
+    @pyqtSlot(np.ndarray, np.ndarray, np.ndarray)
+    def update_processed_feed(self, original, processed, concatenated):
+        """Update camera feed with processed comparison"""
+        try:
+            # Convert concatenated frame to Qt format
+            rgb_image = cv2.cvtColor(concatenated, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            # Scale to fit label
+            pixmap = QPixmap.fromImage(qt_image)
+            scaled_pixmap = pixmap.scaled(self.camera_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.camera_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            print(f"Camera feed update error: {e}")
+    
+    def update_camera_settings(self):
+        """Update camera settings based on UI controls"""
+        self.camera_thread.update_settings(
+            flip_h=self.flip_horizontal.isChecked(),
+            flip_v=self.flip_vertical.isChecked(),
+            exposure=self.exposure_slider.value(),
+            wb=self.wb_slider.value()
+        )
+    
+    def scan_qr_code(self):
+        """Scan QR code from camera feed"""
+        QMessageBox.information(self, "QR Scanner", 
+                               "QR Code scanning will be implemented with camera integration.")
+    
+    def submit_barcode(self):
+        """Submit barcode and validate with server"""
+        barcode = self.barcode_input.text().strip()
+        if not barcode:
+            QMessageBox.warning(self, "Error", "Please enter a barcode.")
+            return
+        
+        # Validate barcode with server
+        if self.validate_barcode(barcode):
+            self.barcode = barcode
+            self.barcode_display.setText(f"Barcode: {barcode}")
+            self.barcode_display.setStyleSheet("background-color: #d4edda; padding: 8px; border: 2px solid #c3e6cb; border-radius: 5px; color: #155724;")
+            self.start_inspection_button.setEnabled(True)
+            QMessageBox.information(self, "Success", "Barcode validated successfully!")
+        else:
+            self.barcode_display.setStyleSheet("background-color: #f8d7da; padding: 8px; border: 2px solid #f5c6cb; border-radius: 5px; color: #721c24;")
+            QMessageBox.critical(self, "Validation Failed", 
+                               "Barcode was rejected in previous process. Inspection cannot proceed.")
+    
+    def validate_barcode(self, barcode):
+        """Validate barcode with server API"""
+        try:
+            # Mock validation
+            return not barcode.endswith('0')
+        except Exception as e:
+            print(f"API validation error: {e}")
+            return False
+    
+    def start_inspection(self):
+        """Start the inspection process"""
+        self.inspection_start_time = datetime.now()
+        self.current_side = 0
+        self.inspection_results = {}
+        
+        # Enable controls
+        self.start_inspection_button.setEnabled(False)
+        self.capture_button.setEnabled(True)
+        self.next_side_button.setEnabled(False)
+        self.manual_override_button.setEnabled(True)
+        self.stop_inspection_button.setEnabled(True)
+        
+        # Start first side
+        self.start_side_inspection()
+    
+    def start_side_inspection(self):
+        """Start inspection of current side"""
+        if self.current_side < len(self.inspection_sides):
+            side_name = self.inspection_sides[self.current_side]
+            self.side_start_time = datetime.now()
+            self.current_side_label.setText(f"Current Side: {side_name}")
+            
+            # Update camera processing for current side
+            self.camera_thread.set_current_side(side_name)
+            
+            # Update side status
+            for i in range(self.side_status_layout.count()):
+                label = self.side_status_layout.itemAt(i).widget()
+                if label and hasattr(label, 'setText'):
+                    if i == self.current_side:
+                        label.setText(f"{self.inspection_sides[i]}: In Progress")
+                        label.setStyleSheet("color: #3498db; font-weight: bold; padding: 3px; font-size: 12px;")
+    
+    def capture_and_analyze(self):
+        """Capture current frame and perform analysis"""
+        side_name = self.inspection_sides[self.current_side]
+        
+        # Simulate analysis result
+        result = self.perform_side_inspection(side_name)
+        
+        # Record result
+        side_time = (datetime.now() - self.side_start_time).total_seconds()
+        self.inspection_results[side_name] = {
+            'result': result,
+            'time': side_time,
+            'timestamp': datetime.now()
+        }
+        
+        # Update UI
+        self.update_side_status(self.current_side, result)
+        
+        # Enable next side button
+        self.capture_button.setEnabled(False)
+        self.next_side_button.setEnabled(True)
+        
+        # Show result message
+        msg = f"Side {side_name} analyzed!\n\nResult: {result}\nTime: {side_time:.1f}s"
+        if result == "FAIL":
+            msg += "\n\nUse Manual Override if needed, or proceed to next side."
+        
+        QMessageBox.information(self, "Analysis Complete", msg)
+    
+    def next_side(self):
+        """Move to next side of inspection"""
+        self.current_side += 1
+        self.progress_bar.setValue(self.current_side)
+        
+        if self.current_side < len(self.inspection_sides):
+            self.start_side_inspection()
+            self.capture_button.setEnabled(True)
+            self.next_side_button.setEnabled(False)
+        else:
+            self.complete_inspection()
+    
+    def perform_side_inspection(self, side_name):
+        """Perform actual inspection logic for a side"""
+        # TODO: Implement actual gradient-based analysis
+        import random
+        return "PASS" if random.random() > 0.25 else "FAIL"
+    
+    def update_side_status(self, side_index, result):
+        """Update the status of a specific side"""
+        if side_index < self.side_status_layout.count():
+            label = self.side_status_layout.itemAt(side_index).widget()
+            if label:
+                side_name = self.inspection_sides[side_index]
+                label.setText(f"{side_name}: {result}")
+                if result == "PASS":
+                    label.setStyleSheet("color: #27ae60; font-weight: bold; padding: 3px; font-size: 12px;")
+                else:
+                    label.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 3px; font-size: 12px;")
+    
+    def complete_inspection(self):
+        """Complete the inspection process"""
+        total_time = (datetime.now() - self.inspection_start_time).total_seconds()
+        
+        # Determine overall result
+        failed_sides = [side for side, data in self.inspection_results.items() if data['result'] == 'FAIL']
+        overall_result = "FAIL" if failed_sides else "PASS"
+        
+        # Update UI
+        self.overall_result.setText(f"Overall: {overall_result}")
+        if overall_result == "PASS":
+            self.overall_result.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 14px; margin: 5px;")
+        else:
+            self.overall_result.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px; margin: 5px;")
+        
+        self.time_info.setText(f"Total Time: {total_time:.1f}s")
+        
+        # Display detailed results
+        self.display_detailed_results(failed_sides)
+        
+        # Log results
+        self.log_inspection_results(overall_result, total_time, failed_sides)
+        
+        # Disable controls
+        self.capture_button.setEnabled(False)
+        self.next_side_button.setEnabled(False)
+        self.stop_inspection_button.setEnabled(False)
+        self.start_inspection_button.setEnabled(True)
+        
+        # Show final result
+        result_msg = f"Inspection Complete!\n\nResult: {overall_result}\nTotal Time: {total_time:.1f}s"
+        if failed_sides:
+            result_msg += f"\n\nFailed Sides: {', '.join(failed_sides)}"
+        
+        QMessageBox.information(self, "Inspection Complete", result_msg)
+    
+    def display_detailed_results(self, failed_sides):
+        """Display detailed inspection results"""
+        # Clear previous results
+        for i in reversed(range(self.results_layout.count())):
+            self.results_layout.itemAt(i).widget().setParent(None)
+        
+        # Add detailed results
+        for side, data in self.inspection_results.items():
+            result_label = QLabel(f"{side}: {data['result']} ({data['time']:.1f}s)")
+            if data['result'] == "PASS":
+                result_label.setStyleSheet("color: #27ae60; padding: 2px; font-size: 11px;")
+            else:
+                result_label.setStyleSheet("color: #e74c3c; padding: 2px; font-size: 11px;")
+            self.results_layout.addWidget(result_label)
+    
+    def log_inspection_results(self, overall_result, total_time, failed_sides):
+        """Log inspection results to CSV file"""
+        try:
+            # Ensure logs directory exists
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))
+            logs_dir = os.path.join(project_root, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            
+            # CSV file path
+            csv_file = os.path.join(logs_dir, "advanced_inspection_log.csv")
+            
+            # Check if file exists to write header
+            file_exists = os.path.exists(csv_file)
+            
+            with open(csv_file, 'a', newline='') as file:
+                writer = csv.writer(file)
+                
+                # Write header if new file
+                if not file_exists:
+                    header = ['Timestamp', 'Barcode', 'Overall_Result', 'Total_Time', 'Failed_Sides']
+                    for side in self.inspection_sides:
+                        header.extend([f'{side}_Result', f'{side}_Time'])
+                    writer.writerow(header)
+                
+                # Write inspection data
+                row = [
+                    datetime.now().isoformat(),
+                    self.barcode,
+                    overall_result,
+                    f"{total_time:.2f}",
+                    ';'.join(failed_sides) if failed_sides else 'None'
+                ]
+                
+                # Add individual side results
+                for side in self.inspection_sides:
+                    if side in self.inspection_results:
+                        row.extend([
+                            self.inspection_results[side]['result'],
+                            f"{self.inspection_results[side]['time']:.2f}"
+                        ])
+                    else:
+                        row.extend(['N/A', '0'])
+                
+                writer.writerow(row)
+                print(f"Advanced inspection results logged to: {csv_file}")
+                
+        except Exception as e:
+            print(f"Error logging results: {e}")
+    
+    def manual_override(self):
+        """Handle manual override"""
+        if not self.inspection_results:
+            QMessageBox.warning(self, "No Inspection", "No inspection has been performed yet.")
+            return
+            
+        reply = QMessageBox.question(self, "Manual Override", 
+                                   "Apply manual override to current inspection?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            QMessageBox.information(self, "Override Applied", "Manual override has been applied.")
+    
+    def stop_inspection(self):
+        """Stop the current inspection"""
+        reply = QMessageBox.question(self, "Stop Inspection", 
+                                   "Are you sure you want to stop the inspection?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.reset_inspection()
+    
+    def reset_inspection(self):
+        """Reset inspection to initial state"""
+        self.current_side = 0
+        self.inspection_results = {}
+        self.current_side_label.setText("Current Side: Not Started")
+        self.progress_bar.setValue(0)
+        self.overall_result.setText("Overall: Pending")
+        self.time_info.setText("Time: 00:00")
+        
+        # Reset side status
+        for i in range(self.side_status_layout.count()):
+            label = self.side_status_layout.itemAt(i).widget()
+            if label and hasattr(label, 'setText'):
+                side_name = self.inspection_sides[i]
+                label.setText(f"{side_name}: Pending")
+                label.setStyleSheet("color: #666; padding: 3px; font-size: 12px;")
+        
+        # Reset buttons
+        self.start_inspection_button.setEnabled(bool(self.barcode))
+        self.capture_button.setEnabled(False)
+        self.next_side_button.setEnabled(False)
+        self.manual_override_button.setEnabled(False)
+        self.stop_inspection_button.setEnabled(False)
+    
+    def back_to_main(self):
+        """Return to main window"""
+        reply = QMessageBox.question(self, "Back to Main", 
+                                   "Return to main menu?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.window_closed.emit()
+            self.close()
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        self.camera_thread.stop_camera()
+        self.window_closed.emit()
+        event.accept()
+
+
+def main():
+    """Main function for testing advanced inspection window"""
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication(sys.argv)
+    window = AdvancedInspectionWindow()
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
