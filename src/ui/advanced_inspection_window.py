@@ -697,19 +697,46 @@ class AdvancedInspectionWindow(QWidget):
             self.barcode_display.setStyleSheet("background-color: #d4edda; padding: 8px; border: 2px solid #c3e6cb; border-radius: 5px; color: #155724;")
             self.start_inspection_button.setEnabled(True)
             QMessageBox.information(self, "Success", "Barcode validated successfully!")
-        else:
+        
+        '''else:
             self.barcode_display.setStyleSheet("background-color: #f8d7da; padding: 8px; border: 2px solid #f5c6cb; border-radius: 5px; color: #721c24;")
             QMessageBox.critical(self, "Validation Failed", 
-                               "Barcode was rejected in previous process. Inspection cannot proceed.")
-    
+                               "Barcode was rejected in previous process. Inspection cannot proceed.")'''
+        
     def validate_barcode(self, barcode):
+        """Validate barcode with Flask + SQLite backend"""
+        import requests
+        try:
+            api_url = f"http://127.0.0.1:5000/validate/{barcode}"
+            response = requests.get(api_url, timeout=5)
+
+            if response.status_code == 200:
+                return True 
+            elif response.status_code == 401:
+                QMessageBox.critical(self, "Barcode", f"Barcode '{barcode}' already inspected")
+                return False
+            elif response.status_code == 404:
+                QMessageBox.warning(self, "Not Found", f"Barcode '{barcode}' not found in database.")
+                return False
+            elif response.status_code == 409:
+                QMessageBox.critical(self, "Validation Failed", 
+                                     f"Barcode '{barcode}' was rejected in previous process. Inspection cannot proceed.")
+                return False
+            else:
+                QMessageBox.critical(self, "Error", f"Server error: {response.status_code}")
+                return False
+        except requests.ConnectionError:
+            QMessageBox.critical(self, "Connection Error", "Could not connect to local API server.")
+            return False
+        
+    '''def validate_barcode(self, barcode):
         """Validate barcode with server API"""
         try:
             # Mock validation
             return not barcode.endswith('0')
         except Exception as e:
             print(f"API validation error: {e}")
-            return False
+            return False'''
     
     def start_inspection(self):
         """Start the inspection process"""
