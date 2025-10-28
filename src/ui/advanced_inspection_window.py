@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QDialog,
                             QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy,
                             QGroupBox, QSlider, QCheckBox, QLineEdit, QTextEdit,
                             QProgressBar, QMessageBox, QComboBox, QScrollArea)
@@ -93,6 +93,7 @@ class CameraThread(QThread):
     
     def __init__(self):
         super().__init__()
+
         self.camera = None
         self.running = False
         self.flip_horizontal = False
@@ -273,6 +274,23 @@ class AdvancedInspectionWindow(QWidget):
     
     def __init__(self, parent=None):
         super().__init__()
+       
+    
+    # 🌟 Ask for station number at launch
+        from PyQt5.QtWidgets import QInputDialog
+        station_number, ok = QInputDialog.getInt(
+            self,
+            "Station Setup",
+            "Enter station number:",
+            value=1,
+            min=1,
+            max=50
+        )
+        if ok:
+            self.station = station_number
+        else:
+            self.station = 1  # default
+        print(f"✅ Station number set to: {self.station}")
         self.parent_window = parent
         self.barcode = ""
         self.current_side = 0
@@ -706,6 +724,8 @@ class AdvancedInspectionWindow(QWidget):
     def validate_barcode(self, barcode):
         """Validate barcode with Flask + SQLite backend"""
         import requests
+        from logger import JSONLogger  # Local import to avoid circular dependency
+        self.logger = JSONLogger(self.barcode,self.station)
         try:
             api_url = f"http://127.0.0.1:5000/validate/{barcode}"
             response = requests.get(api_url, timeout=5)
@@ -713,8 +733,64 @@ class AdvancedInspectionWindow(QWidget):
             if response.status_code == 200:
                 return True 
             elif response.status_code == 401:
-                QMessageBox.critical(self, "Barcode", f"Barcode '{barcode}' already inspected")
-                return False
+                data = response.json()
+                details = data.get("inspection_details", {})
+
+                # Build detail string
+                info_text = (
+                    f"<b>Barcode:</b> {data['barcode_id']}<br>"
+                    f"<b>Status:</b> {data['status']}<br><br>"
+                    f"<b>Inspection Details:</b><br>"
+                    f"Front: {details.get('front', '-')}, "
+                    f"Back: {details.get('back', '-')}, "
+                    f"Right: {details.get('right_side', '-')}, "
+                    f"Left: {details.get('left_side', '-')}, "
+                    f"Top: {details.get('top', '-')}, "
+                    f"Down: {details.get('down', '-')}"
+                )
+
+                # Show custom dialog
+                dialog = QDialog(self)
+                dialog.setWindowTitle("Duplicate Barcode Found")
+                layout = QVBoxLayout(dialog)
+                label = QLabel(info_text)
+                label.setTextFormat(1)  # Allow HTML
+                layout.addWidget(label)
+
+                # Buttons
+                append_btn = QPushButton("Append")
+                update_btn = QPushButton("Update")
+                cancel_btn = QPushButton("Cancel")
+
+                layout.addWidget(append_btn)
+                layout.addWidget(update_btn)
+                layout.addWidget(cancel_btn)
+
+                # Define actions
+                def append_action():
+                    dialog.done(1)  # proceed forward
+                def update_action():
+                    dialog.done(2)  # re-inspection
+                def cancel_action():
+                    dialog.done(0)  # invalidate
+                append_btn.clicked.connect(append_action)
+                update_btn.clicked.connect(update_action)
+                cancel_btn.clicked.connect(cancel_action)
+
+                result = dialog.exec_()
+
+                # Interpret user choice
+                if result == 1:
+                    print("User chose to append and continue.")
+                    self.logger.set_type(1)
+                    return True
+                elif result == 2:
+                    print("User chose to update previous data.")
+                    self.logger.set_type(2)
+                    return True            
+                else:
+                    print("User cancelled.")
+                    return False
             elif response.status_code == 404:
                 QMessageBox.warning(self, "Not Found", f"Barcode '{barcode}' not found in database.")
                 return False
@@ -740,6 +816,8 @@ class AdvancedInspectionWindow(QWidget):
     
     def start_inspection(self):
         """Start the inspection process"""
+        from logger import JSONLogger  # Local import to avoid circular dependency
+        self.logger = JSONLogger(self.barcode,self.station)
         self.inspection_start_time = datetime.now()
         self.current_side = 0
         self.inspection_results = {}
@@ -779,6 +857,7 @@ class AdvancedInspectionWindow(QWidget):
         # Simulate analysis result
         result = self.perform_side_inspection(side_name)
         
+        
         # Record result
         side_time = (datetime.now() - self.side_start_time).total_seconds()
         self.inspection_results[side_name] = {
@@ -786,21 +865,45 @@ class AdvancedInspectionWindow(QWidget):
             'time': side_time,
             'timestamp': datetime.now()
         }
-        
-        # Update UI
-        self.update_side_status(self.current_side, result)
-        
-        # Enable next side button
-        self.capture_button.setEnabled(False)
-        self.next_side_button.setEnabled(True)
-        
-        # Show result message
-        msg = f"Side {side_name} analyzed!\n\nResult: {result}\nTime: {side_time:.1f}s"
+        if result == "PASS":
+            # Update UI
+            self.update_side_status(self.current_side, result)
+            self.logger.log_step(side_name, result)
+            # Enable next side button
+            self.capture_button.setEnabled(False)
+            self.next_side_button.setEnabled(True)
+            
+            # Show result message
+            msg = f"Side {side_name} analyzed!\n\nResult: {result}\n"
+            QMessageBox.information(self, "Inspection Result", msg)
         if result == "FAIL":
-            msg += "\n\nUse Manual Override if needed, or proceed to next side."
-        
-        QMessageBox.information(self, "Analysis Complete", msg)
-    
+            self.next_side_button.setEnabled(False)
+            QMessageBox.warning(self, "Inspection Failed",
+                                f"{side_name} failed inspection!\n\n"
+                                "Attempting Manual Override...")
+            # Trigger manual override popup
+            self.handle_manual_override_popup(side_name)
+    def handle_manual_override_popup(self, side_name):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Manual Override Required")
+        dialog.setText(f"{side_name} FAILED.\nApply override or send log?")
+        override_btn = dialog.addButton("Override", QMessageBox.AcceptRole)
+        fail_btn = dialog.addButton("Send Log", QMessageBox.RejectRole)
+        dialog.exec_()
+        if dialog.clickedButton() == override_btn:
+            self.inspection_results[side_name]['result'] = 'PASS'
+            self.logger.log_step(side_name,  self.inspection_results[side_name]['result'])
+            self.update_side_status(self.current_side, "PASS")
+            self.next_side()
+        else:
+            self.logger.set_final_status("FAIL")
+
+            self.logger.log_step(side_name,  self.inspection_results[side_name]['result'])
+            self.logger.send_log_on_complete("http://127.0.0.1:5000/receive_log")
+            self.update_side_status(self.inspection_sides.index(side_name), "FAIL")
+            self.next_side_button.setEnabled(False)
+            self.capture_button.setEnabled(False)
+
     def next_side(self):
         """Move to next side of inspection"""
         self.current_side += 1
@@ -852,8 +955,11 @@ class AdvancedInspectionWindow(QWidget):
         self.display_detailed_results(failed_sides)
         
         # Log results
-        self.log_inspection_results(overall_result, total_time, failed_sides)
-        
+        #self.log_inspection_results(overall_result, total_time, failed_sides)
+        # ✅ Finalize JSON log
+        self.logger.set_final_status(overall_result)
+        self.logger.send_log_on_complete("http://127.0.0.1:5000/receive_log")
+
         # Disable controls
         self.capture_button.setEnabled(False)
         self.next_side_button.setEnabled(False)
@@ -943,7 +1049,14 @@ class AdvancedInspectionWindow(QWidget):
                                    QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
-            QMessageBox.information(self, "Override Applied", "Manual override has been applied.")
+             side=self.inspection_sides[self.current_side]
+             self.logger.set_final_status("FAIL")
+             self.logger.log_step(side, "FAIL")
+             self.logger.send_log_on_complete("http://127.0.0.1:5000/receive_log")
+             self.update_side_status(self.inspection_sides.index(side), "FAIL")
+             self.next_side_button.setEnabled(False)
+             self.capture_button.setEnabled(False)
+             QMessageBox.information(self, "Override Applied", "Manual override has been applied.")
     
     def stop_inspection(self):
         """Stop the current inspection"""

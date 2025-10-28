@@ -56,7 +56,7 @@ def load_config(config_path: str = 'config.ini') -> dict:
     # Set default configuration
     default_config = {
         'camera': {
-            'camera_id': '0',
+            'camera_id': '1',
             'resolution_width': '1920',
             'resolution_height': '1080',
             'fps': '30'

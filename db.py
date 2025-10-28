@@ -4,8 +4,8 @@ import sqlite3
 conn = sqlite3.connect("inspection.db")
 cursor = conn.cursor()
 
-cursor.execute(""" DELETE FROM inspection_details
-WHERE barcode_id IN ('A123', 'B456');
+cursor.execute("""ALTER TABLE inspection_details ADD COLUMN station INTEGER DEFAULT 1;
+
 """)
 conn.commit()
 
