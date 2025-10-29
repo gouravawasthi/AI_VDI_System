@@ -917,8 +917,19 @@ class AdvancedInspectionWindow(QWidget):
             self.complete_inspection()
     
     def perform_side_inspection(self, side_name):
+        '''refrence_image = self.mask_images(side_name)
+        mask_image = self.reference_images(side_name)
+        from preprocess import FramePreprocessor
         """Perform actual inspection logic for a side"""
-        # TODO: Implement actual gradient-based analysis
+        preprocessor = FramePreprocessor(camera_index=0, duration=1)
+        processed_frame = preprocessor.preprocess()
+
+        if processed_frame is None:
+            QMessageBox.warning(self, "Camera Error", "Failed to capture frame.")
+            return'''
+        ''' Implement actual inspection logic here
+         return "PASS" or "FAIL" based on analysis '''
+        
         import random
         return "PASS" if random.random() > 0.25 else "FAIL"
     
