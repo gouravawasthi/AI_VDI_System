@@ -1,0 +1,33 @@
+{
+    "barcode_id": "A123",
+    "timestamp": "2025-10-29 12:19:25.405597",
+    "steps": [
+        {
+            "step": "Front",
+            "result": "PASS",
+            "timestamp": "2025-10-29 12:19:26.318668"
+        },
+        {
+            "step": "Back",
+            "result": "PASS",
+            "timestamp": "2025-10-29 12:19:29.352041"
+        },
+        {
+            "step": "Left",
+            "result": "PASS",
+            "timestamp": "2025-10-29 12:19:32.585955"
+        },
+        {
+            "step": "Right",
+            "result": "PASS",
+            "timestamp": "2025-10-29 12:19:35.485986"
+        },
+        {
+            "step": "Top",
+            "result": "PASS",
+            "timestamp": "2025-10-29 12:19:42.364155"
+        }
+    ],
+    "final_status": "FAIL",
+    "completed_at": "2025-10-29 12:19:47.625474"
+}
