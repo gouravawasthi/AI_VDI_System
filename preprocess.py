@@ -3,7 +3,7 @@ import numpy as np
 import time
 
 class FramePreprocessor:
-    def __init__(self, camera_index=0, duration=1, blur_kernel=(5, 5)):
+    def __init__(self, camera_index=1, duration=1, blur_kernel=(3, 3)):
         """
         Initializes the preprocessor with camera and blur settings.
         
@@ -32,7 +32,7 @@ class FramePreprocessor:
                 continue
 
             # Apply Gaussian blur to reduce noise
-            blurred = cv2.GaussianBlur(frame, self.blur_kernel, 0)
+            blurred = cv2.GaussianBlur(frame, self.blur_kernel, 3)
             frames.append(blurred)
 
         cap.release()
