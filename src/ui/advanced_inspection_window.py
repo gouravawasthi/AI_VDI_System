@@ -91,9 +91,9 @@ class CameraThread(QThread):
     frame_ready = pyqtSignal(np.ndarray)
     processed_ready = pyqtSignal(np.ndarray, np.ndarray, np.ndarray)  # original, processed, concatenated
     
-    def __init__(self):
+    def __init__(self,parent_window):
         super().__init__()
-
+        self.parent = parent_window
         self.camera = None
         self.running = False
         self.flip_horizontal = False
@@ -208,179 +208,85 @@ class CameraThread(QThread):
         """Main camera loop with image processing"""
         while self.running and self.camera and self.camera.isOpened():
             try:
+                # If inspection is currently showing processed frames, skip capturing new video
+                if self.parent.show_processed:
+                    self.msleep(100)
+                    continue
+
                 ret, frame = self.camera.read()
-                if ret:
-                    # Apply transformations
-                    if self.flip_horizontal and self.flip_vertical:
-                        frame = cv2.flip(frame, -1)
-                    elif self.flip_horizontal:
-                        frame = cv2.flip(frame, 1)
-                    elif self.flip_vertical:
-                        frame = cv2.flip(frame, 0)
-                    
-                    # Process frame with current side reference
-                    display_frame=self.process_f(frame)
-                    processed_frame, concatenated_frame = self.process_frame(frame)
-                    
-                    # Emit signals
-                    self.frame_ready.emit(display_frame)
-                    self.processed_ready.emit(frame, processed_frame, concatenated_frame)
-                else:
+                if not ret:
                     break
+
+                # Apply transformations
+                if self.flip_horizontal and self.flip_vertical:
+                    frame = cv2.flip(frame, -1)
+                elif self.flip_horizontal:
+                    frame = cv2.flip(frame, 1)
+                elif self.flip_vertical:
+                    frame = cv2.flip(frame, 0)
+
+                # Process frame for guiding display (green outline)
+                processed_frame, concatenated_frame = self.process_frame(frame)
+                self.processed_ready.emit(processed_frame, processed_frame, concatenated_frame)
+
             except Exception as e:
                 print(f"Camera processing error: {e}")
                 break
-            self.msleep(33)  # ~30 FPS
+
+            self.msleep(33)
     
     def process_frame(self, frame):
-        '''from src.inspection.goldvsref import inspect_image
-        """Process frame with gradient comparison"""
-        try:
-            # Get current gradient
-            current_gradient = self.processor.compute_gradient(frame)
-            
-            # Get reference data for current side
-            if self.current_side in self.reference_images:
-                reference_img = self.reference_images[self.current_side]
-                #reference_gradient = self.processor.compute_gradient(reference_img)
-                
-                mask = self.mask_images.get(self.current_side, None)
-                
-                # Create difference overlay
-                overlay, diff = self.processor.create_difference_overlay(
-                    current_gradient, reference_gradient, mask
-                )
-                
-                # Concatenate original and processed
-                concatenated = self.processor.concatenate_frames(frame, overlay)
-                
-                return overlay, concatenated
-            else:
-                # No reference available, just return gradient
-                gradient_3ch = cv2.cvtColor(current_gradient, cv2.COLOR_GRAY2BGR)
-                concatenated = self.processor.concatenate_frames(frame, gradient_3ch)
-                return gradient_3ch, concatenated
-                
-        except Exception as e:
-            print(f"Frame processing error: {e}")
-            # Return original frame if processing fails
-            concatenated = np.hstack((frame, frame))
-            return frame, concatenated'
-        
-        """Process frame with gold image inspection pipeline"""
+        """
+        Handles frame processing during inspection.
+        When self.parent.show_processed == False → guiding outline + waiting text.
+        When self.parent.show_processed == True  → analyze captured frame (once).
+        """
         try:
             side = self.current_side
-            gold_img = self.reference_images.get(side, None)
-            gold_mask = self.mask_images.get(side, None)
+            gold_img = self.reference_images.get(side)
+            gold_mask = self.mask_images.get(side)
 
+            # No reference available
             if gold_img is None or gold_mask is None:
-                # 🟠 Fallback mode — just show gradient comparison
-                gradient = self.processor.compute_gradient(frame)
-                gradient_3ch = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
-                concatenated = self.processor.concatenate_frames(frame, gradient_3ch)
-                return gradient_3ch, concatenated
+                guiding = np.zeros_like(frame)
+                cv2.putText(guiding, "No reference found", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                return guiding, self.processor.concatenate_frames(frame, guiding)
 
-            # 🧠 Perform gold image inspection
-            result = inspect_image(gold_img, gold_mask, frame, f"Align {side} side properly")
+            # Resize references
+            h, w = frame.shape[:2]
+            gold_img = cv2.resize(gold_img, (w, h))
+            gold_mask = cv2.resize(gold_mask, (w, h))
 
-            if result["Status"] == 1:
-                # ✅ Successful inspection
-                overlay = result["OutputImage"]
+            # CASE 1: Pre-capture → show guiding outline
+            if not self.parent.show_processed:
+                guiding = frame.copy()
+                contours, _ = cv2.findContours(gold_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(guiding, contours, -1, (0, 255, 0), 2)
 
+                waiting = np.zeros_like(frame)
+                cv2.putText(waiting, "Waiting for capture...", (50, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                concat = self.processor.concatenate_frames(waiting, guiding)
+                return guiding, concat
+
+            # CASE 2: Post-capture → use analysis overlay
             else:
-                # 🔴 Registration or comparison failed
-                overlay = np.zeros_like(frame)
-
-                # Display message clearly in red text
-                cv2.putText(
-                    overlay,
-                    result.get("Message", "Inspection failed"),
-                    (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA
-                )
-
-                # Optional — you can log or trigger re-capture logic here
-                print(f"[WARN] {side} inspection failed: {result.get('Message')}")
-
-                # Optionally emit signal or flag to GUI
-                if hasattr(self, "inspection_failed"):
-                    self.inspection_failed.emit(side, result.get("Message", ""))
-
-            # 🧩 Show side-by-side view
-            concatenated = self.processor.concatenate_frames(frame, overlay)
-            return overlay, concatenated
+                from src.inspection.goldvsref import inspect_image
+                result = inspect_image(gold_img, gold_mask, frame, f"Align {side}")
+                if result["Status"] == 0:
+                    err = np.zeros_like(frame)
+                    cv2.putText(err, "Alignment failed", (40, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    concat = self.processor.concatenate_frames(err, frame)
+                    return err, concat
+                overlay = result["OutputImage"]
+                concat = self.processor.concatenate_frames(frame, overlay)
+                return overlay, concat
 
         except Exception as e:
-            print(f"[ERROR] Frame processing error: {e}")
-            blank = np.zeros_like(frame)
-            concatenated = np.hstack((frame, blank))
-            return blank, concatenated'''
-        color = (0, 255, 0)
-        thickness = 2
-
-        mask = self.mask_images.get(self.current_side, None)
-        if mask is None:
-            print("[WARN] No mask found for current side.")
+            print(f"[Error] Frame processing failed: {e}")
             return frame, self.processor.concatenate_frames(frame, frame)
-
-        # --- Ensure mask is single-channel (grayscale) ---
-        if len(mask.shape) == 3:
-            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-
-        # --- Resize mask to match frame size ---
-        frame_h, frame_w = frame.shape[:2]
-        mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
-
-        # --- Find contours on resized mask ---
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # --- Draw contours over the camera frame ---
-        processed_frame = frame.copy()
-        cv2.drawContours(processed_frame, contours, -1, color, thickness)
-
-        # --- Return overlay and concatenated visualization ---
-        return processed_frame, self.processor.concatenate_frames(frame, processed_frame)
-    def process_f(self, frame):
-        """Process frame with gradient comparison"""
-        try:
-                
-            color = (0, 255, 0)
-            thickness = 2
-
-            mask = self.mask_images.get(self.current_side, None)
-            if mask is None:
-                print("[WARN] No mask found for current side.")
-                return frame, self.processor.concatenate_frames(frame, frame)
-
-            # --- Ensure mask is single-channel (grayscale) ---
-            if len(mask.shape) == 3:
-                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-
-            # --- Resize mask to match frame size ---
-            frame_h, frame_w = frame.shape[:2]
-            mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
-
-            # --- Find contours on resized mask ---
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            # --- Draw contours over the camera frame ---
-            processed_frame = frame.copy()
-            cv2.drawContours(processed_frame, contours, -1, color, thickness)
-
-            # --- Return overlay and concatenated visualization ---
-            return self.processor.concatenate_frames(frame, processed_frame)
-                
-        except Exception as e:
-            print(f"Frame processing error: {e}")
-            # Return original frame if processing fails
-            concatenated = np.hstack((frame, frame))
-            return frame, concatenated
-
-
 class AdvancedInspectionWindow(QWidget):
     """Advanced inspection window with image comparison"""
     
@@ -415,7 +321,8 @@ class AdvancedInspectionWindow(QWidget):
         self.inspection_results = {}
         self.inspection_start_time = None
         self.side_start_time = None
-        self.camera_thread = CameraThread()
+        self.captured_frame = None
+        self.camera_thread = CameraThread(self)
         self.init_ui()
         self.setup_camera()
         
@@ -767,7 +674,7 @@ class AdvancedInspectionWindow(QWidget):
     def setup_camera(self):
         """Setup camera connection"""
         try:
-            self.camera_thread.frame_ready.connect(self.update_camera_feed)
+            #self.camera_thread.frame_ready.connect(self.update_camera_feed)
             self.camera_thread.processed_ready.connect(self.update_processed_feed)
             self.camera_status.setText("Camera: Connected")
             self.camera_status.setStyleSheet("color: #27ae60; font-size: 14px; margin: 5px;")
@@ -1009,13 +916,25 @@ class AdvancedInspectionWindow(QWidget):
     
     def capture_and_analyze(self):
         """Capture current frame and perform analysis"""
-        side_name = self.inspection_sides[self.current_side]
         self.show_processed = True
-        # Simulate analysis result
-        result = self.perform_side_inspection(side_name)
+
+        # Capture the latest frame from camera
+        ret, frame = self.camera_thread.camera.read()
+        if not ret:
+            QMessageBox.warning(self, "Camera Error", "Failed to capture frame.")
+            return
         
-        
+        # Freeze frame
+        self.captured_frame = frame.copy()
+        side_name = self.inspection_sides[self.current_side]
+
+        # Perform analysis on captured frame
+        processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
+    
+        # Force display of analyzed frame
+        self.update_processed_feed(self.captured_frame, processed, concatenated)
         # Record result
+        result = self.perform_side_inspection(side_name)
         side_time = (datetime.now() - self.side_start_time).total_seconds()
         self.inspection_results[side_name] = {
             'result': result,
@@ -1064,6 +983,7 @@ class AdvancedInspectionWindow(QWidget):
     def next_side(self):
         """Move to next side of inspection"""
         self.show_processed = False
+        self.captured_frame = None
         self.current_side += 1
         self.progress_bar.setValue(self.current_side)
         
@@ -1237,6 +1157,8 @@ class AdvancedInspectionWindow(QWidget):
         if reply == QMessageBox.Yes:
             self.show_processed=False
             self.camera_active=False
+            self.camera_thread.stop_camera()
+
             self.reset_inspection()
     
     def reset_inspection(self):
