@@ -219,10 +219,11 @@ class CameraThread(QThread):
                         frame = cv2.flip(frame, 0)
                     
                     # Process frame with current side reference
+                    display_frame=self.process_f(frame)
                     processed_frame, concatenated_frame = self.process_frame(frame)
                     
                     # Emit signals
-                    self.frame_ready.emit(frame)
+                    self.frame_ready.emit(display_frame)
                     self.processed_ready.emit(frame, processed_frame, concatenated_frame)
                 else:
                     break
@@ -232,6 +233,7 @@ class CameraThread(QThread):
             self.msleep(33)  # ~30 FPS
     
     def process_frame(self, frame):
+        '''from src.inspection.goldvsref import inspect_image
         """Process frame with gradient comparison"""
         try:
             # Get current gradient
@@ -240,7 +242,7 @@ class CameraThread(QThread):
             # Get reference data for current side
             if self.current_side in self.reference_images:
                 reference_img = self.reference_images[self.current_side]
-                reference_gradient = self.processor.compute_gradient(reference_img)
+                #reference_gradient = self.processor.compute_gradient(reference_img)
                 
                 mask = self.mask_images.get(self.current_side, None)
                 
@@ -263,6 +265,119 @@ class CameraThread(QThread):
             print(f"Frame processing error: {e}")
             # Return original frame if processing fails
             concatenated = np.hstack((frame, frame))
+            return frame, concatenated'
+        
+        """Process frame with gold image inspection pipeline"""
+        try:
+            side = self.current_side
+            gold_img = self.reference_images.get(side, None)
+            gold_mask = self.mask_images.get(side, None)
+
+            if gold_img is None or gold_mask is None:
+                # 🟠 Fallback mode — just show gradient comparison
+                gradient = self.processor.compute_gradient(frame)
+                gradient_3ch = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
+                concatenated = self.processor.concatenate_frames(frame, gradient_3ch)
+                return gradient_3ch, concatenated
+
+            # 🧠 Perform gold image inspection
+            result = inspect_image(gold_img, gold_mask, frame, f"Align {side} side properly")
+
+            if result["Status"] == 1:
+                # ✅ Successful inspection
+                overlay = result["OutputImage"]
+
+            else:
+                # 🔴 Registration or comparison failed
+                overlay = np.zeros_like(frame)
+
+                # Display message clearly in red text
+                cv2.putText(
+                    overlay,
+                    result.get("Message", "Inspection failed"),
+                    (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA
+                )
+
+                # Optional — you can log or trigger re-capture logic here
+                print(f"[WARN] {side} inspection failed: {result.get('Message')}")
+
+                # Optionally emit signal or flag to GUI
+                if hasattr(self, "inspection_failed"):
+                    self.inspection_failed.emit(side, result.get("Message", ""))
+
+            # 🧩 Show side-by-side view
+            concatenated = self.processor.concatenate_frames(frame, overlay)
+            return overlay, concatenated
+
+        except Exception as e:
+            print(f"[ERROR] Frame processing error: {e}")
+            blank = np.zeros_like(frame)
+            concatenated = np.hstack((frame, blank))
+            return blank, concatenated'''
+        color = (0, 255, 0)
+        thickness = 2
+
+        mask = self.mask_images.get(self.current_side, None)
+        if mask is None:
+            print("[WARN] No mask found for current side.")
+            return frame, self.processor.concatenate_frames(frame, frame)
+
+        # --- Ensure mask is single-channel (grayscale) ---
+        if len(mask.shape) == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+
+        # --- Resize mask to match frame size ---
+        frame_h, frame_w = frame.shape[:2]
+        mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
+
+        # --- Find contours on resized mask ---
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # --- Draw contours over the camera frame ---
+        processed_frame = frame.copy()
+        cv2.drawContours(processed_frame, contours, -1, color, thickness)
+
+        # --- Return overlay and concatenated visualization ---
+        return processed_frame, self.processor.concatenate_frames(frame, processed_frame)
+    def process_f(self, frame):
+        """Process frame with gradient comparison"""
+        try:
+                
+            color = (0, 255, 0)
+            thickness = 2
+
+            mask = self.mask_images.get(self.current_side, None)
+            if mask is None:
+                print("[WARN] No mask found for current side.")
+                return frame, self.processor.concatenate_frames(frame, frame)
+
+            # --- Ensure mask is single-channel (grayscale) ---
+            if len(mask.shape) == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+
+            # --- Resize mask to match frame size ---
+            frame_h, frame_w = frame.shape[:2]
+            mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
+
+            # --- Find contours on resized mask ---
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # --- Draw contours over the camera frame ---
+            processed_frame = frame.copy()
+            cv2.drawContours(processed_frame, contours, -1, color, thickness)
+
+            # --- Return overlay and concatenated visualization ---
+            return self.processor.concatenate_frames(frame, processed_frame)
+                
+        except Exception as e:
+            print(f"Frame processing error: {e}")
+            # Return original frame if processing fails
+            concatenated = np.hstack((frame, frame))
             return frame, concatenated
 
 
@@ -271,9 +386,11 @@ class AdvancedInspectionWindow(QWidget):
     
     inspection_complete = pyqtSignal(dict)
     window_closed = pyqtSignal()
-    
+   
     def __init__(self, parent=None):
         super().__init__()
+        self.camera_active = False
+        self.show_processed = False 
        
     
     # 🌟 Ask for station number at launch
@@ -650,15 +767,11 @@ class AdvancedInspectionWindow(QWidget):
     def setup_camera(self):
         """Setup camera connection"""
         try:
-            if self.camera_thread.start_camera(0):
-                self.camera_thread.frame_ready.connect(self.update_camera_feed)
-                self.camera_thread.processed_ready.connect(self.update_processed_feed)
-                self.camera_status.setText("Camera: Connected")
-                self.camera_status.setStyleSheet("color: #27ae60; font-size: 14px; margin: 5px;")
-            else:
-                self.camera_status.setText("Camera: Failed to connect")
-                self.camera_status.setStyleSheet("color: #e74c3c; font-size: 14px; margin: 5px;")
-                self.camera_label.setText("Camera Not Available\n\nPlease check camera connection")
+            self.camera_thread.frame_ready.connect(self.update_camera_feed)
+            self.camera_thread.processed_ready.connect(self.update_processed_feed)
+            self.camera_status.setText("Camera: Connected")
+            self.camera_status.setStyleSheet("color: #27ae60; font-size: 14px; margin: 5px;")
+            
         except Exception as e:
             print(f"Camera setup error: {e}")
             self.camera_status.setText("Camera: Error")
@@ -667,25 +780,62 @@ class AdvancedInspectionWindow(QWidget):
     
     @pyqtSlot(np.ndarray)
     def update_camera_feed(self, frame):
-        """Update basic camera feed"""
-        pass  # We'll use the processed feed instead
+        """Display mask outline only after Start Inspection is pressed."""
+        try:
+            '''
+            if not self.camera_active:
+                # Camera not started yet → show black screen
+                black = np.zeros((480, 640, 3), dtype=np.uint8)
+                rgb_image = cv2.cvtColor(black, cv2.COLOR_BGR2RGB)
+            else:
+                # Camera active → draw mask outline
+                mask = self.camera_thread.mask_images.get(self.current_side, None)
+                if mask is not None:
+                    if len(mask.shape) == 3:
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    mask = cv2.resize(mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    overlay = frame.copy()
+                    cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+                else:
+                    overlay = frame'''
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Convert to QPixmap
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+            scaled_pixmap = pixmap.scaled(self.camera_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.camera_label.setPixmap(scaled_pixmap)
+
+        except Exception as e:
+            print(f"Camera feed update error: {e}")
+
     
     @pyqtSlot(np.ndarray, np.ndarray, np.ndarray)
     def update_processed_feed(self, original, processed, concatenated):
         """Update camera feed with processed comparison"""
+       
         try:
-            # Convert concatenated frame to Qt format
-            rgb_image = cv2.cvtColor(concatenated, cv2.COLOR_BGR2RGB)
+            if not self.camera_active or not self.show_processed:
+                # Right panel shows waiting text
+                waiting_frame = np.zeros_like(original)
+                cv2.putText(waiting_frame, "Waiting for frame capture...",
+                            (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                combined = np.hstack((original, waiting_frame))
+            else:
+                combined = concatenated
+
+            rgb_image = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            
-            # Scale to fit label
             pixmap = QPixmap.fromImage(qt_image)
             scaled_pixmap = pixmap.scaled(self.camera_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.camera_label.setPixmap(scaled_pixmap)
+
         except Exception as e:
-            print(f"Camera feed update error: {e}")
+            print(f"Processed feed update error: {e}")
     
     def update_camera_settings(self):
         """Update camera settings based on UI controls"""
@@ -725,7 +875,7 @@ class AdvancedInspectionWindow(QWidget):
         """Validate barcode with Flask + SQLite backend"""
         import requests
         from logger import JSONLogger  # Local import to avoid circular dependency
-        self.logger = JSONLogger(self.barcode,self.station)
+        self.logger = JSONLogger(self.barcode,self.station) # Local import to avoid circular dependency
         try:
             api_url = f"http://127.0.0.1:5000/validate/{barcode}"
             response = requests.get(api_url, timeout=5)
@@ -815,9 +965,15 @@ class AdvancedInspectionWindow(QWidget):
             return False'''
     
     def start_inspection(self):
+        """Triggered when Start Inspection is clicked"""
+        self.camera_active = True
+        self.show_processed = False
+        if not self.camera_thread.running:
+            if not self.camera_thread.start_camera(0):
+                QMessageBox.critical(self, "Camera Error", "Unable to start camera.")
+                return
         """Start the inspection process"""
-        from logger import JSONLogger  # Local import to avoid circular dependency
-        self.logger = JSONLogger(self.barcode,self.station)
+        
         self.inspection_start_time = datetime.now()
         self.current_side = 0
         self.inspection_results = {}
@@ -833,6 +989,7 @@ class AdvancedInspectionWindow(QWidget):
         self.start_side_inspection()
     
     def start_side_inspection(self):
+        
         """Start inspection of current side"""
         if self.current_side < len(self.inspection_sides):
             side_name = self.inspection_sides[self.current_side]
@@ -853,7 +1010,7 @@ class AdvancedInspectionWindow(QWidget):
     def capture_and_analyze(self):
         """Capture current frame and perform analysis"""
         side_name = self.inspection_sides[self.current_side]
-        
+        self.show_processed = True
         # Simulate analysis result
         result = self.perform_side_inspection(side_name)
         
@@ -906,6 +1063,7 @@ class AdvancedInspectionWindow(QWidget):
 
     def next_side(self):
         """Move to next side of inspection"""
+        self.show_processed = False
         self.current_side += 1
         self.progress_bar.setValue(self.current_side)
         
@@ -1070,12 +1228,15 @@ class AdvancedInspectionWindow(QWidget):
              QMessageBox.information(self, "Override Applied", "Manual override has been applied.")
     
     def stop_inspection(self):
+        
         """Stop the current inspection"""
         reply = QMessageBox.question(self, "Stop Inspection", 
                                    "Are you sure you want to stop the inspection?",
                                    QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
+            self.show_processed=False
+            self.camera_active=False
             self.reset_inspection()
     
     def reset_inspection(self):
