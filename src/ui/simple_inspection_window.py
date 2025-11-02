@@ -5,6 +5,8 @@ Simple Inspection Window - Main inspection interface for AI VDI System (without 
 import sys
 import os
 import csv
+import cv2
+import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
@@ -12,7 +14,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                             QGroupBox, QSlider, QCheckBox, QLineEdit, QTextEdit,
                             QProgressBar, QMessageBox, QComboBox, QScrollArea)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QFont
+from PyQt5.QtGui import QPixmap, QFont, QImage
 
 
 class SimpleInspectionWindow(QWidget):
@@ -26,9 +28,14 @@ class SimpleInspectionWindow(QWidget):
         self.parent_window = parent
         self.barcode = ""
         self.current_side = 0
-        self.inspection_sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+        self.inspection_sides = ["Front", "Back", "Left", "Right"]
         self.inspection_results = {}
         self.inspection_start_time = None
+        self.current_camera_device = 0  # Default camera device
+        self.camera_cap = None  # OpenCV VideoCapture object
+        self.camera_timer = QTimer()  # Timer for camera updates
+        self.camera_timer.timeout.connect(self.update_camera_frame)
+        self.side_start_time = None
         self.side_start_time = None
         self.init_ui()
         
@@ -171,6 +178,20 @@ class SimpleInspectionWindow(QWidget):
         camera_layout = QVBoxLayout()
         camera_group.setLayout(camera_layout)
         
+        # Camera device selection
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(QLabel("Camera Device:"))
+        self.camera_device_combo = QComboBox()
+        self.camera_device_combo.addItems(["Camera 0", "Camera 1", "Camera 2", "Camera 3"])
+        self.camera_device_combo.currentIndexChanged.connect(self.on_camera_device_changed)
+        device_layout.addWidget(self.camera_device_combo)
+        camera_layout.addLayout(device_layout)
+        
+        # Camera status
+        self.camera_connection_status = QLabel("Camera: Not Connected")
+        self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+        camera_layout.addWidget(self.camera_connection_status)
+        
         # Flip settings
         self.flip_horizontal = QCheckBox("Flip Horizontal")
         camera_layout.addWidget(self.flip_horizontal)
@@ -239,7 +260,7 @@ class SimpleInspectionWindow(QWidget):
         camera_panel.setLayout(camera_layout)
         
         # Camera feed placeholder
-        self.camera_label = QLabel("Camera Feed\n\n📹\n\nCamera integration will be\nimplemented here")
+        self.camera_label = QLabel("Live Camera Feed\n\n📹\n\nSelect a camera device from\nthe left panel to start\nlive preview")
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setMinimumSize(800, 600)
         self.camera_label.setStyleSheet("""
@@ -252,7 +273,7 @@ class SimpleInspectionWindow(QWidget):
         camera_layout.addWidget(self.camera_label)
         
         # Camera status
-        self.camera_status = QLabel("Camera: Simulation Mode")
+        self.camera_status = QLabel("Camera: Select device to start live preview")
         self.camera_status.setAlignment(Qt.AlignCenter)
         self.camera_status.setStyleSheet("color: #f39c12; font-size: 16px; font-weight: bold; margin: 10px;")
         camera_layout.addWidget(self.camera_status)
@@ -351,6 +372,100 @@ class SimpleInspectionWindow(QWidget):
         
         layout.addWidget(results_group)
     
+    def on_camera_device_changed(self, index):
+        """Handle camera device selection change and start live preview"""
+        self.current_camera_device = index
+        self.start_camera_preview(index)
+    
+    def start_camera_preview(self, camera_index):
+        """Start live camera preview"""
+        # Stop current camera if running
+        self.stop_camera_preview()
+        
+        # Try to open the selected camera
+        self.camera_cap = cv2.VideoCapture(camera_index)
+        
+        if self.camera_cap.isOpened():
+            # Set camera properties for better performance
+            self.camera_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.camera_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.camera_cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            # Start timer for live preview
+            self.camera_timer.start(33)  # ~30 FPS
+            
+            self.camera_connection_status.setText(f"Camera {camera_index}: Connected")
+            self.camera_connection_status.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
+            self.camera_status.setText(f"Camera: Device {camera_index} - Live Preview")
+            
+            print(f"Camera {camera_index} started successfully")
+        else:
+            self.camera_connection_status.setText(f"Camera {camera_index}: Failed to Connect")
+            self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+            self.camera_status.setText(f"Camera: Device {camera_index} - Connection Failed")
+            
+            # Show placeholder
+            self.camera_label.setText(f"Camera {camera_index}\nConnection Failed\n\n❌\n\nTry selecting a different camera")
+            self.camera_label.setStyleSheet("""
+                background-color: #e74c3c; 
+                color: white; 
+                font-size: 20px; 
+                border-radius: 8px;
+                border: 2px solid #c0392b;
+            """)
+            
+            print(f"Failed to open camera {camera_index}")
+    
+    def stop_camera_preview(self):
+        """Stop camera preview"""
+        if self.camera_timer.isActive():
+            self.camera_timer.stop()
+        
+        if self.camera_cap and self.camera_cap.isOpened():
+            self.camera_cap.release()
+            self.camera_cap = None
+    
+    def update_camera_frame(self):
+        """Update camera frame for live preview"""
+        if self.camera_cap and self.camera_cap.isOpened():
+            ret, frame = self.camera_cap.read()
+            if ret:
+                # Apply camera settings (flip if needed)
+                if self.flip_horizontal.isChecked():
+                    frame = cv2.flip(frame, 1)
+                if self.flip_vertical.isChecked():
+                    frame = cv2.flip(frame, 0)
+                
+                # Convert frame to QPixmap and display
+                self.display_camera_frame(frame)
+            else:
+                # Camera disconnected
+                self.camera_connection_status.setText(f"Camera {self.current_camera_device}: Disconnected")
+                self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+                self.stop_camera_preview()
+    
+    def display_camera_frame(self, frame):
+        """Display camera frame in the label"""
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        
+        # Create QImage
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        
+        # Scale to fit label while maintaining aspect ratio
+        label_size = self.camera_label.size()
+        scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+            label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        
+        self.camera_label.setPixmap(scaled_pixmap)
+    
+    def get_camera_for_side(self, side):
+        """Get the camera device index for any side (now uses single camera)"""
+        return self.current_camera_device
+    
     def scan_qr_code(self):
         """Scan QR code from camera feed"""
         QMessageBox.information(self, "QR Scanner", 
@@ -417,8 +532,8 @@ class SimpleInspectionWindow(QWidget):
             self.side_start_time = datetime.now()
             self.current_side_label.setText(f"Current Side: {side_name}")
             
-            # Update camera display for current side
-            self.camera_label.setText(f"Inspecting: {side_name}\n\n📹\n\nPosition product to show\n{side_name} side\n\nPress 'Next Side' when ready")
+            # Update camera status for current side
+            self.camera_status.setText(f"Camera: Device {self.current_camera_device} - Inspecting {side_name}")
             
             # Update side status
             for i in range(self.side_status_layout.count()):
@@ -660,15 +775,11 @@ class SimpleInspectionWindow(QWidget):
         self.overall_result.setStyleSheet("color: #2c3e50; font-weight: bold; font-size: 16px; margin: 5px;")
         self.time_info.setText("Time: 00:00")
         
-        # Reset camera display
-        self.camera_label.setText("Camera Feed\n\n📹\n\nCamera integration will be\nimplemented here")
-        self.camera_label.setStyleSheet("""
-            background-color: #2c3e50; 
-            color: white; 
-            font-size: 24px; 
-            border-radius: 8px;
-            border: 2px solid #34495e;
-        """)
+        # Reset camera status but keep live preview
+        if self.camera_cap and self.camera_cap.isOpened():
+            self.camera_status.setText(f"Camera: Device {self.current_camera_device} - Live Preview")
+        else:
+            self.camera_status.setText("Camera: Not Connected")
         
         # Reset side status
         for i in range(self.side_status_layout.count()):
@@ -707,6 +818,8 @@ class SimpleInspectionWindow(QWidget):
     
     def closeEvent(self, event):
         """Handle window close event"""
+        # Stop camera preview and release resources
+        self.stop_camera_preview()
         self.window_closed.emit()
         event.accept()
 

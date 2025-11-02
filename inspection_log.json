@@ -1,20 +1,14 @@
 {
-    "station": 2,
+    "station": 1,
     "barcode_id": "A123",
-    "timestamp": "2025-10-29 15:00:31.032038",
+    "timestamp": "2025-11-02 14:30:00.150387",
     "steps": [
         {
             "step": "Front",
             "result": "PASS",
-            "timestamp": "2025-10-29 15:00:31.699049"
-        },
-        {
-            "step": "Front",
-            "result": "FAIL",
-            "timestamp": "2025-10-29 15:00:35.262136"
+            "timestamp": "2025-11-02 14:32:17.668665"
         }
     ],
-    "final_status": "FAIL",
-    "type": 0,
-    "completed_at": "2025-10-29 15:00:35.261498"
+    "final_status": null,
+    "type": 2
 }

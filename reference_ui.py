@@ -185,7 +185,7 @@ class ReferenceImageUI(QMainWindow):
         
         # Data
         self.current_side = "front"
-        self.sides = ["front", "back", "left", "right", "top", "bottom"]
+        self.sides = ["front", "back", "left", "right"]
         self.reference_images = {}
         self.mask_images = {}
         self.camera_thread = None
@@ -250,6 +250,20 @@ class ReferenceImageUI(QMainWindow):
         # Camera controls
         camera_group = QGroupBox("Camera Controls")
         camera_layout = QVBoxLayout(camera_group)
+        
+        # Camera device selection
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(QLabel("Camera Device:"))
+        self.camera_device_combo = QComboBox()
+        self.camera_device_combo.addItems(["Camera 0", "Camera 1", "Camera 2", "Camera 3"])
+        self.camera_device_combo.currentIndexChanged.connect(self.on_camera_device_changed)
+        device_layout.addWidget(self.camera_device_combo)
+        camera_layout.addLayout(device_layout)
+        
+        # Camera status
+        self.camera_connection_status = QLabel("Camera: Select device for live preview")
+        self.camera_connection_status.setStyleSheet("color: #f39c12; font-weight: bold; padding: 5px;")
+        camera_layout.addWidget(self.camera_connection_status)
         
         self.start_camera_btn = QPushButton("Start Camera")
         self.stop_camera_btn = QPushButton("Stop Camera")
@@ -402,6 +416,38 @@ class ReferenceImageUI(QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.progress_text.append(f"[{timestamp}] {message}")
         
+    def on_camera_device_changed(self, index):
+        """Handle camera device selection change and start live preview"""
+        self.log_message(f"Camera device changed to: Camera {index}")
+        # If camera is running, restart with new device immediately
+        if self.camera_thread and self.camera_thread.running:
+            self.stop_camera()
+            # Start new camera immediately
+            QTimer.singleShot(100, lambda: self.start_camera_with_device(index))
+        else:
+            # Start camera immediately if not running
+            self.start_camera_with_device(index)
+    
+    def start_camera_with_device(self, device_index):
+        """Start camera with specific device index"""
+        if self.camera_thread is None:
+            self.camera_thread = CameraThread(device_index)
+            self.camera_thread.frameReady.connect(self.on_frame_ready)
+            self.camera_thread.error.connect(self.on_camera_error)
+        else:
+            self.camera_thread.camera_index = device_index
+            
+        self.camera_thread.start_camera()
+        self.start_camera_btn.setEnabled(False)
+        self.stop_camera_btn.setEnabled(True)
+        self.capture_btn.setEnabled(True)
+        
+        # Update status
+        self.camera_connection_status.setText(f"Camera {device_index}: Connected")
+        self.camera_connection_status.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
+        
+        self.log_message(f"Camera started with device {device_index}")
+        
     def on_side_changed(self, side_text):
         """Handle side selection change"""
         self.current_side = side_text.lower()
@@ -440,16 +486,24 @@ class ReferenceImageUI(QMainWindow):
         
     def start_camera(self):
         """Start camera feed"""
+        device_index = self.camera_device_combo.currentIndex()
         if self.camera_thread is None:
-            self.camera_thread = CameraThread()
+            self.camera_thread = CameraThread(device_index)
             self.camera_thread.frameReady.connect(self.on_frame_ready)
             self.camera_thread.error.connect(self.on_camera_error)
+        else:
+            self.camera_thread.camera_index = device_index
             
         self.camera_thread.start_camera()
         self.start_camera_btn.setEnabled(False)
         self.stop_camera_btn.setEnabled(True)
         self.capture_btn.setEnabled(True)
-        self.log_message("Camera started")
+        
+        # Update status
+        self.camera_connection_status.setText(f"Camera {device_index}: Connected")
+        self.camera_connection_status.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
+        
+        self.log_message(f"Camera started with device {device_index}")
         
     def stop_camera(self):
         """Stop camera feed"""
@@ -459,6 +513,11 @@ class ReferenceImageUI(QMainWindow):
         self.start_camera_btn.setEnabled(True)
         self.stop_camera_btn.setEnabled(False)
         self.capture_btn.setEnabled(False)
+        
+        # Update status
+        self.camera_connection_status.setText("Camera: Disconnected")
+        self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+        
         self.log_message("Camera stopped")
         
     def on_frame_ready(self, frame):
@@ -468,6 +527,10 @@ class ReferenceImageUI(QMainWindow):
         
     def on_camera_error(self, error_msg):
         """Handle camera error"""
+        # Update status
+        self.camera_connection_status.setText("Camera: Error")
+        self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
+        
         QMessageBox.warning(self, "Camera Error", error_msg)
         self.log_message(f"Camera error: {error_msg}")
         

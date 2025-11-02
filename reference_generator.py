@@ -21,7 +21,7 @@ class ReferenceImageCapture:
         self.blur_kernel_size = blur_kernel_size
         self.reference_image = None
         
-    def capture_from_camera(self, camera_index=0):
+    def capture_from_camera(self, camera_index=1):
         """Capture reference image from camera"""
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
@@ -372,7 +372,7 @@ class ReferenceAndMaskGenerator:
     """Main class for generating reference images and masks"""
     
     def __init__(self):
-        self.sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+        self.sides = ["Front", "Back", "Left", "Right"]
         self.current_side = 0
         self.project_dir = self.get_project_directory()
         self.reference_dir = os.path.join(self.project_dir, "data", "reference_images")

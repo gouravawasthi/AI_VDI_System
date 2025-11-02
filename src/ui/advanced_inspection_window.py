@@ -95,6 +95,7 @@ class CameraThread(QThread):
         super().__init__()
         self.parent = parent_window
         self.camera = None
+        self.camera_index = 0  # Default camera device
         self.running = False
         self.flip_horizontal = False
         self.flip_vertical = False
@@ -119,7 +120,7 @@ class CameraThread(QThread):
             os.makedirs(ref_dir, exist_ok=True)
             os.makedirs(mask_dir, exist_ok=True)
             
-            sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+            sides = ["Front", "Back", "Left", "Right"]
             
             for side in sides:
                 # Load reference image
@@ -157,9 +158,13 @@ class CameraThread(QThread):
         """Set the current inspection side"""
         self.current_side = side
     
-    def start_camera(self, camera_id=0):
+    def start_camera(self, camera_id=None):
         """Start camera capture"""
         try:
+            # Use specified camera_id or fall back to self.camera_index
+            if camera_id is None:
+                camera_id = self.camera_index
+                
             self.camera = cv2.VideoCapture(camera_id)
             if self.camera and self.camera.isOpened():
                 # Set camera properties
@@ -169,10 +174,12 @@ class CameraThread(QThread):
                 
                 self.running = True
                 self.start()
+                print(f"Camera {camera_id} started successfully")
                 return True
             else:
                 if self.camera:
                     self.camera.release()
+                print(f"Failed to open camera {camera_id}")
                 return False
         except Exception as e:
             print(f"Camera start error: {e}")
@@ -317,11 +324,12 @@ class AdvancedInspectionWindow(QWidget):
         self.parent_window = parent
         self.barcode = ""
         self.current_side = 0
-        self.inspection_sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+        self.inspection_sides = ["Front", "Back", "Left", "Right"]
         self.inspection_results = {}
         self.inspection_start_time = None
         self.side_start_time = None
         self.captured_frame = None
+        self.current_camera_device = 0  # Single camera device for all sides
         self.camera_thread = CameraThread(self)
         self.init_ui()
         self.setup_camera()
@@ -459,6 +467,20 @@ class AdvancedInspectionWindow(QWidget):
         camera_group = QGroupBox("Camera Settings")
         camera_layout = QVBoxLayout()
         camera_group.setLayout(camera_layout)
+        
+        # Camera device selection
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(QLabel("Camera Device:"))
+        self.camera_device_combo = QComboBox()
+        self.camera_device_combo.addItems(["Camera 0", "Camera 1", "Camera 2", "Camera 3"])
+        self.camera_device_combo.currentIndexChanged.connect(self.on_camera_device_changed)
+        device_layout.addWidget(self.camera_device_combo)
+        camera_layout.addLayout(device_layout)
+        
+        # Camera status
+        self.camera_connection_status = QLabel("Camera: Select device for live preview")
+        self.camera_connection_status.setStyleSheet("color: #f39c12; font-weight: bold; padding: 5px;")
+        camera_layout.addWidget(self.camera_connection_status)
         
         # Flip settings
         self.flip_horizontal = QCheckBox("Flip Horizontal")
@@ -674,15 +696,26 @@ class AdvancedInspectionWindow(QWidget):
     def setup_camera(self):
         """Setup camera connection"""
         try:
-            #self.camera_thread.frame_ready.connect(self.update_camera_feed)
+            # Initialize camera with default device
+            self.camera_thread.camera_index = self.current_camera_device
             self.camera_thread.processed_ready.connect(self.update_processed_feed)
-            self.camera_status.setText("Camera: Connected")
+            
+            # Start camera immediately to show live preview
+            self.camera_thread.start_camera()
+            
+            self.camera_status.setText(f"Camera: Device {self.current_camera_device} Connected")
             self.camera_status.setStyleSheet("color: #27ae60; font-size: 14px; margin: 5px;")
+            
+            # Update connection status
+            self.camera_connection_status.setText(f"Camera {self.current_camera_device}: Connected")
+            self.camera_connection_status.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
             
         except Exception as e:
             print(f"Camera setup error: {e}")
             self.camera_status.setText("Camera: Error")
             self.camera_status.setStyleSheet("color: #e74c3c; font-size: 14px; margin: 5px;")
+            self.camera_connection_status.setText("Camera: Connection Failed")
+            self.camera_connection_status.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
             self.camera_label.setText("Camera Error")
     
     @pyqtSlot(np.ndarray)
@@ -752,6 +785,35 @@ class AdvancedInspectionWindow(QWidget):
             exposure=self.exposure_slider.value(),
             wb=self.wb_slider.value()
         )
+    
+    def on_camera_device_changed(self, index):
+        """Handle camera device selection change and restart camera with new device"""
+        self.current_camera_device = index
+        print(f"Camera device changed to: {index}")
+        
+        # Restart camera with new device
+        if self.camera_thread:
+            self.camera_thread.stop_camera()
+            QTimer.singleShot(200, lambda: self.start_camera_with_device(index))
+        
+        # Update status
+        self.camera_connection_status.setText(f"Camera {index}: Connecting...")
+        self.camera_connection_status.setStyleSheet("color: #f39c12; font-weight: bold; padding: 5px;")
+    
+    def start_camera_with_device(self, device_index):
+        """Start camera with specific device index"""
+        if self.camera_thread:
+            self.camera_thread.camera_index = device_index
+            self.camera_thread.start_camera()
+            print(f"Camera started with device {device_index}")
+            
+            # Update status
+            self.camera_connection_status.setText(f"Camera {device_index}: Connected")
+            self.camera_connection_status.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
+    
+    def get_camera_for_side(self, side):
+        """Get the camera device index for any side (now uses single camera)"""
+        return self.current_camera_device
     
     def scan_qr_code(self):
         """Scan QR code from camera feed"""

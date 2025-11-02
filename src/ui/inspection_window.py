@@ -106,7 +106,7 @@ class InspectionWindow(QWidget):
         self.parent_window = parent
         self.barcode = ""
         self.current_side = 0
-        self.inspection_sides = ["Front", "Back", "Left", "Right", "Top", "Bottom"]
+        self.inspection_sides = ["Front", "Back", "Left", "Right"]
         self.inspection_results = {}
         self.inspection_start_time = None
         self.side_start_time = None

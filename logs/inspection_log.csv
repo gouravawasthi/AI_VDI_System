@@ -1,0 +1,2 @@
+Timestamp,Barcode,Overall_Result,Total_Time,Failed_Sides,Front_Result,Front_Time,Back_Result,Back_Time,Left_Result,Left_Time,Right_Result,Right_Time
+2025-11-02T14:23:09.135878,A123,FAIL,54.49,Right,PASS,49.18,PASS,4.36,PASS,0.66,FAIL,0.29
