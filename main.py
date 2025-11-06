@@ -129,9 +129,23 @@ def create_directory_structure():
     
     for directory in directories:
         Path(directory).mkdir(parents=True, exist_ok=True)
+import subprocess
+import time
+import sys
 
+def start_server():
+    """Start Flask server in background"""
+    server_process = subprocess.Popen(
+        [sys.executable, "server.py"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    print("🚀 Flask server starting...")
+    time.sleep(2)  # Wait for server to start
+    return server_process
 
 def main():
+    server=start_server()
     """Main function to start the AI VDI System"""
     try:
         # Create necessary directories
@@ -186,6 +200,10 @@ def main():
         print(f"Fatal error: {e}")
         logging.exception("Fatal error occurred")
         sys.exit(1)
+    finally:
+        server.terminate()
+        server.wait()
+        print("Flask server terminated.")
 
 
 if __name__ == "__main__":
