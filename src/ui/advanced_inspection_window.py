@@ -112,8 +112,8 @@ class CameraThread(QThread):
             # Get reference images directory
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.dirname(os.path.dirname(current_dir))
-            ref_dir = os.path.join(project_root, "data", "reference_images")
-            mask_dir = os.path.join(project_root, "data", "mask_images")
+            ref_dir = os.path.join(project_root, "data", "ELOT")
+            mask_dir = os.path.join(project_root, "data", "ELOT")
             
             # Create directories if they don't exist
             os.makedirs(ref_dir, exist_ok=True)
@@ -179,17 +179,22 @@ class CameraThread(QThread):
             return False
     
     def stop_camera(self):
-        """Stop camera capture"""
+        """Gracefully stop camera thread"""
         self.running = False
+
+        # Wait for thread loop to exit
+        if self.isRunning():
+            self.quit()
+            self.wait(2000)
+
+        # Release camera only after thread is stopped
         if self.camera:
             try:
                 self.camera.release()
-            except:
-                pass
+            except Exception as e:
+                print(f"Camera release error: {e}")
             self.camera = None
-        if self.isRunning():
-            self.quit()
-            self.wait(3000)
+
     
     def update_settings(self, flip_h=False, flip_v=False, exposure=0, wb=5000):
         """Update camera settings"""
@@ -1157,7 +1162,10 @@ class AdvancedInspectionWindow(QWidget):
         if reply == QMessageBox.Yes:
             self.show_processed=False
             self.camera_active=False
-            self.camera_thread.stop_camera()
+        
+            self.camera_label.clear()
+                
+
 
             self.reset_inspection()
     

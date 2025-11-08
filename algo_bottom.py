@@ -42,62 +42,41 @@ class SobelBottom:
     # -------------------------------------------------------
     # ROI Analysis
     # -------------------------------------------------------
-    def analyze_roi(self, ref_path: str, inp_path: str, roi_detect: tuple, roi_display: tuple):
-        """
-        Run the full Sobel inspection pipeline:
-        1. Register input image with reference.
-        2. Compute Sobel gradients in ROI.
-        3. Mark result on display ROI.
+    def analyze_roi(self, ref_img, inp_img, roi_definitions):
+       # Step 1: Register image
+        registered = self.registrar.register(ref_img, inp_img)
+        if isinstance(registered, tuple):
+            registered = registered[0]
 
-        Parameters:
-            ref_path : str - reference image path
-            inp_path : str - input image path
-            roi_detect : tuple (x, y, w, h) - ROI for gradient analysis
-            roi_display : tuple (x, y, w, h) - ROI to display result
+        annotated = registered.copy()
 
-        Returns:
-            result_dict : {
-                'status': 'PRESENT' or 'ABSENT',
-                'mean_gradient': float,
-                'grad_display': np.ndarray,
-                'annotated_img': np.ndarray
-            }
-        """
-        # Load images
-        ref = cv2.imread(ref_path)
-        inp = cv2.imread(inp_path)
-        if ref is None or inp is None:
-            raise ValueError("Could not load input or reference image.")
+        # Step 2: Analyze Plate ROI
+        if "Plate" not in roi_definitions:
+            raise ValueError("ROI definition for 'Plate' missing.")
 
-        # Step 1: Register image
-        registered, H = self.registrar.register(ref, inp)
-
-        # Step 2: Extract ROI for gradient analysis
-        x, y, w, h = roi_detect
-        roi_img = registered[y:y+h, x:x+w].copy()
-
-        # Step 3: Compute gradient magnitude
-        grad_mag = self.compute_gradient_magnitude(roi_img)
+        x, y, w, h = roi_definitions["Plate"]
+        roi = registered[y:y+h, x:x+w]
+        grad_mag = self.compute_gradient_magnitude(roi)
         mean_grad = np.mean(grad_mag)
 
-        # Step 4: Determine result
-        status = "PRESENT" if mean_grad > self.grad_threshold else "ABSENT"
-        color = (0, 255, 0) if status == "PRESENT" else (0, 0, 255)
+        # Step 3: Determine presence
+        plate_status = "PASS" if mean_grad > self.grad_threshold else "FAIL"
+        screw_status = plate_status  # mirror behavior
 
-        # Visualization-friendly image
-        grad_display = cv2.convertScaleAbs(grad_mag)
+        color = (0, 255, 0) if plate_status == "PASS" else (0, 0, 255)
+        cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(annotated, f"Plate: {plate_status} ({mean_grad:.1f})",
+                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        # Step 5: Annotate display ROI on registered image
-        xd, yd, wd, hd = roi_display
-        annotated = registered.copy()
-        cv2.rectangle(annotated, (xd, yd), (xd+wd, yd+hd), color, 2)
-        cv2.putText(annotated, f"{status}", (xd, yd - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        print(f"[SOBEL] Plate mean_grad={mean_grad:.2f} → {plate_status}")
 
-        print(f"[SOBEL] ROI mean gradient: {mean_grad:.2f}  -->  {status}")
+        # Step 4: Return clean results
+        results = {
+            "Screw": screw_status,
+            "Plate": plate_status
+        }
 
         return {
-            "status": status,
-            "annotated_img": annotated,
-        
+            "annotated": annotated,
+            "results": results
         }

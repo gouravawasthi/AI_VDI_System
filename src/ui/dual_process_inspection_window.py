@@ -30,13 +30,13 @@ class CameraThread(QThread):
     def __init__(self,parent_window):
         super().__init__()
         self.top_detector = ImageInspectionPipeline()
-        self.top_rois = {
-                'roi1': (172, 112, 105, 64),
-                'roi2': (561, 141, 194, 153),
-                'roi3': (803, 221, 165, 198),
-                    }
+        self.top_rois =self.top_rois = {
+                'Antenna': (172, 112, 105, 64),
+                'Capacitor': (561, 141, 194, 153),
+                'Speaker': (803, 221, 165, 198),
+            }
         self.bottom_rois = {
-            '   roi1': (830, 199, 346, 419),
+            'Plate': (830, 199, 346, 419),
                 }
         self.top_ref=None
         self.bottom_ref=None
@@ -552,12 +552,13 @@ class DualProcessInspectionWindow(QWidget):
         self.top_status_label.setStyleSheet("font-weight: bold; color: #666;")
         top_layout.addWidget(self.top_status_label)
         
-        self.top_component_labels = []
-        for i in range(3):
-            label = QLabel(f"Component {i+1}: Pending")
+        top_names = ["Antenna", "Capacitor", "Speaker"]
+        self.top_component_labels = {}
+        for name in top_names:
+            label = QLabel(f"{name}: Pending")
             label.setStyleSheet("color: #666; padding: 3px;")
             top_layout.addWidget(label)
-            self.top_component_labels.append(label)
+            self.top_component_labels[name] = label
         
         results_layout.addWidget(top_group)
         
@@ -585,10 +586,38 @@ class DualProcessInspectionWindow(QWidget):
         self.overall_result.setStyleSheet("color: #2c3e50; margin: 10px;")
         self.overall_result.setAlignment(Qt.AlignCenter)
         results_layout.addWidget(self.overall_result)
-        
+        # Manual Override Section
+        manual_group = QGroupBox("Manual Override")
+        manual_layout = QVBoxLayout()
+        manual_group.setLayout(manual_layout)
+
+        self.manual_override_checkbox = QCheckBox("Enable Manual Override")
+        self.manual_override_checkbox.toggled.connect(self.toggle_manual_override)
+        manual_layout.addWidget(self.manual_override_checkbox)
+
+        # Dropdowns for manual results
+        from PyQt5.QtWidgets import QComboBox
+        self.manual_fields = {
+            "Antenna": QComboBox(),
+            "Capacitor": QComboBox(),
+            "Speaker": QComboBox()
+        }
+        for name, combo in self.manual_fields.items():
+            combo.addItems(["PASS", "FAIL"])
+            combo.setEnabled(False)
+            manual_layout.addWidget(QLabel(name))
+            manual_layout.addWidget(combo)
+
+        results_layout.addWidget(manual_group)
         results_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         
         main_layout.addWidget(results_panel)
+    def toggle_manual_override(self):
+        """Enable or disable manual result selection."""
+        enabled = self.manual_override_checkbox.isChecked()
+        for combo in self.manual_fields.values():
+            combo.setEnabled(enabled)
+        print(f"Manual override {'enabled' if enabled else 'disabled'}.")
     def setup_camera(self):
         """Setup camera connection"""
         try:
@@ -621,9 +650,9 @@ class DualProcessInspectionWindow(QWidget):
                 # Define ROI coordinates for 3 components in TOP
                 # TODO: Adjust these coordinates based on your actual setup
                 self.top_rois = {
-                'roi1': (172, 112, 105, 64),
-                'roi2': (561, 141, 194, 153),
-                'roi3': (803, 221, 165, 198),
+                'Antenna': (172, 112, 105, 64),
+                'Capacitor': (561, 141, 194, 153),
+                'Speaker': (803, 221, 165, 198),
                     }
                 
             else:
@@ -638,7 +667,7 @@ class DualProcessInspectionWindow(QWidget):
                 # Define ROI coordinates for 3 components in BOTTOM
                 # TODO: Adjust these coordinates based on your actual setup
                 self.bottom_rois= {
-            '   roi1': (830, 199, 346, 419),
+            'Plate': (830, 199, 346, 419),
                 }
                 from algo_bottom import SobelBottom 
                 self.bottom_detector=SobelBottom()
@@ -731,70 +760,93 @@ class DualProcessInspectionWindow(QWidget):
             QMessageBox.information(self, "Success", "Barcode validated! Ready to start TOP process.")
     
     def validate_barcode(self, barcode):
-        """Validate barcode with API"""
+        """Validate barcode against the new dynamic API (CHIPINSPECTION)."""
         import requests
-        from logger import JSONLogger  # Local import to avoid circular dependency
-        self.logger = JSONLogger(self.barcode,self.station)
+        from LOGGERINLINE import JSONLogger  # Local import to avoid circular dependency
+        self.logger = JSONLogger(self.barcode, self.station)
+
+        api_url = "http://127.0.0.1:5000/api/CHIPINSPECTION"
         try:
-            response = requests.get(f"http://127.0.0.1:5000/validate/{barcode}", timeout=5)
-            if response.status_code == 200:
+            # --- Step 1: Query barcode record ---
+            response = requests.get(f"{api_url}?barcode={barcode}", timeout=5)
+
+            # --- Case 1: No record found (New barcode) ---
+            if response.status_code == 404:
+                print(f"[INFO] New barcode detected: {barcode}")
                 return True
-            elif response.status_code == 401:
+
+            # --- Case 2: Record exists (Duplicate) ---
+            elif response.status_code == 200:
                 data = response.json()
-                details = data.get("inspection_details", {})
+                records = data.get("data", [])
 
-                # Build detail string
-                info_text = (
-                    f"<b>Barcode:</b> {data['barcode_id']}<br>"
-                )
+                if records:
+                    latest = records[0]
+                    info_text = (
+                        f"<b>Barcode:</b> {latest.get('Barcode', barcode)}<br>"
+                        f"<b>Process ID:</b> {latest.get('Process_id', '-')}"
+                    )
 
-                # Show custom dialog
-                dialog = QDialog(self)
-                dialog.setWindowTitle("Duplicate Barcode Found")
-                layout = QVBoxLayout(dialog)
-                label = QLabel(info_text)
-                label.setTextFormat(1)  # Allow HTML
-                layout.addWidget(label)
+                    # --- Create Dialog ---
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("Duplicate Barcode Found")
+                    layout = QVBoxLayout(dialog)
+                    label = QLabel(info_text)
+                    label.setTextFormat(1)  # Allow HTML
+                    layout.addWidget(label)
 
-                # Buttons
-                append_btn = QPushButton("Append")
-                update_btn = QPushButton("Update")
-                cancel_btn = QPushButton("Cancel")
+                    # Buttons
+                    append_btn = QPushButton("Append")
+                    update_btn = QPushButton("Update")
+                    cancel_btn = QPushButton("Cancel")
+                    layout.addWidget(append_btn)
+                    layout.addWidget(update_btn)
+                    layout.addWidget(cancel_btn)
 
-                layout.addWidget(append_btn)
-                layout.addWidget(update_btn)
-                layout.addWidget(cancel_btn)
+                    # Button handlers
+                    def append_action(): dialog.done(1)
+                    def update_action(): dialog.done(2)
+                    def cancel_action(): dialog.done(0)
+                    append_btn.clicked.connect(append_action)
+                    update_btn.clicked.connect(update_action)
+                    cancel_btn.clicked.connect(cancel_action)
 
-                # Define actions
-                def append_action():
-                    dialog.done(1)  # proceed forward
-                def update_action():
-                    dialog.done(2)  # re-inspection
-                def cancel_action():
-                    dialog.done(0)  # invalidate
-                append_btn.clicked.connect(append_action)
-                update_btn.clicked.connect(update_action)
-                cancel_btn.clicked.connect(cancel_action)
+                    result = dialog.exec_()
 
-                result = dialog.exec_()
+                    # --- Interpret user choice ---
+                    if result == 1:
+                        print("[VALIDATE] User chose to APPEND data.")
+                        self.logger.set_type(1)
+                        return True
+                    elif result == 2:
+                        print("[VALIDATE] User chose to UPDATE existing record.")
+                        self.logger.set_type(2)
+                        return True
+                    else:
+                        print("[VALIDATE] User cancelled operation.")
+                        return False
 
-                # Interpret user choice
-                if result == 1:
-                    print("User chose to append and continue.")
-                    self.logger.set_type(1)
-                    return True
-                elif result == 2:
-                    print("User chose to update previous data.")
-                    self.logger.set_type(2)
-                    return True            
                 else:
-                    print("User cancelled.")
-                    return False
+                    # API returned 200 but no data
+                    return True
+
+            # --- Case 3: Unexpected API behavior ---
             else:
-                QMessageBox.warning(self, "Validation Failed", f"Barcode validation failed: {response.status_code}")
+                QMessageBox.warning(
+                    self, "Validation Failed",
+                    f"Unexpected response from server ({response.status_code})"
+                )
                 return False
+
         except requests.ConnectionError:
-            QMessageBox.critical(self, "Connection Error", "Could not connect to API server.")
+            QMessageBox.critical(
+                self, "Connection Error",
+                "Could not connect to API server at http://127.0.0.1:5000"
+            )
+            return False
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Validation exception: {e}")
             return False
     def stop_inspection(self):
         """Stop the current inspection and reset the state."""
@@ -878,42 +930,42 @@ class DualProcessInspectionWindow(QWidget):
         # Perform analysis on captured frame
         processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
         try:
-            result_data = self.camera_thread.latest_result if hasattr(self.camera_thread, "latest_result") else None
-
-            if result_data and "results" in result_data:
-                roi_results = result_data["results"]
-                all_pass = True
-
-                # Update UI component labels
-                for i, (roi_name, status) in enumerate(roi_results.items()):
-                    label_text = f"Component {i+1}: {status}"
-                    color = "#27ae60" if status.upper() == "PASS" else "#e74c3c"
-                    self.top_component_labels[i].setText(label_text)
-                    self.top_component_labels[i].setStyleSheet(
-                        f"color: {color}; padding: 3px; font-weight: bold;"
-                    )
-                    if status.upper() != "PASS":
-                        all_pass = False
-
-                # Update overall TOP status
-                if all_pass:
-                    self.top_status_label.setText("Status: PASS ✅")
-                    self.top_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
-                else:
-                    self.top_status_label.setText("Status: FAIL ❌")
-                    self.top_status_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
-
-            else:
+    # Directly use the updated top_results from CameraThread
+            roi_results = self.top_results
+            if not roi_results:
                 print("[WARN] No valid results returned from TOP detector.")
                 self.top_status_label.setText("Status: ERROR ⚠️")
                 self.top_status_label.setStyleSheet("font-weight: bold; color: #f39c12;")
+                return
+
+            all_pass = True
+            for name, status in roi_results.items():
+                label_text = f"{name}: {status}"
+                color = "#27ae60" if status.upper() == "PASS" else "#e74c3c"
+                self.top_component_labels[name].setText(label_text)
+                self.top_component_labels[name].setStyleSheet(
+                    f"color: {color}; padding: 3px; font-weight: bold;"
+                )
+                if status.upper() != "PASS":
+                    all_pass = False
+
+            # Update TOP status
+            if all_pass:
+                self.top_status_label.setText("Status: PASS ✅")
+                self.top_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+            else:
+                self.top_status_label.setText("Status: FAIL ❌")
+                self.top_status_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+
+            # Enable Submit button, disable capture
+            self.capture_top_button.setEnabled(False)
+            self.submit_top_button.setEnabled(True)
+
 
         except Exception as e:
-            print(f"[ERROR] Failed to update status labels: {e}")
+            print(f"[ERROR] Failed to update TOP inline results: {e}")
             self.top_status_label.setText("Status: ERROR ⚠️")
             self.top_status_label.setStyleSheet("font-weight: bold; color: #f39c12;")
-    
-        # Force display of analyzed frame
         self.update_processed_feed(self.captured_frame, processed, concatenated)
         '''
         
@@ -1009,58 +1061,90 @@ class DualProcessInspectionWindow(QWidget):
 
     
     def submit_top_to_api(self):
-        """Submit TOP results to API"""
-        if not self.top_results:
-            QMessageBox.warning(self, "No Data", "No TOP results to submit.")
+        """Submit TOP inspection results to the new dynamic API."""
+        from logger import JSONLogger
+
+        if not self.top_results or not isinstance(self.top_results, dict):
+            QMessageBox.warning(self, "No Data", "No valid TOP results to submit.")
             return
-        
-        # Prepare payload
+
+        # ---- 1️⃣ Evaluate automatic results ----
+        antenna_status = self.top_results.get("Antenna", "FAIL")
+        capacitor_status = self.top_results.get("Capacitor", "FAIL")
+        speaker_status = self.top_results.get("Speaker", "FAIL")
+
+        auto_pass = all(s == "PASS" for s in [antenna_status, capacitor_status, speaker_status])
+
+        # ---- 2️⃣ Handle manual overrides ----
+        manual_enabled = self.manual_override_checkbox.isChecked()
+        manual_antenna = self.manual_fields["Antenna"].currentText() if manual_enabled else None
+        manual_capacitor = self.manual_fields["Capacitor"].currentText() if manual_enabled else None
+        manual_speaker = self.manual_fields["Speaker"].currentText() if manual_enabled else None
+
+        if manual_enabled:
+            print("[INFO] Manual override is active.")
+            manual_pass = all(s == "PASS" for s in [manual_antenna, manual_capacitor, manual_speaker])
+        else:
+            manual_pass = auto_pass
+
+        overall_result = "PASS" if manual_pass else "FAIL"
+
+        # ---- 3️⃣ Construct server payload ----
         payload = {
-            "barcode_id": self.barcode,
-            "station": self.station,
-            "process": "TOP",
-            "timestamp": datetime.now().isoformat(),
-            "components": []
+            "Barcode": self.barcode,
+            "DT": datetime.now().isoformat(),
+            "Process_id": 2,  # INLINE process
+            "Station_ID": self.station,
+            "Antenna": 1 if antenna_status == "PASS" else 0,
+            "Capacitor": 1 if capacitor_status == "PASS" else 0,
+            "Speaker": 1 if speaker_status == "PASS" else 0,
+            "Result": 1 if auto_pass else 0,
+            "ManualAntenna": 1 if manual_antenna == "PASS" else 0,
+            "ManualCapacitor": 1 if manual_capacitor == "PASS" else 0,
+            "ManualSpeaker": 1 if manual_speaker == "PASS" else 0,
+            "ManualResult": 1 if manual_pass else 0
         }
-        
-        all_present = True
-        for result in self.top_results:
-            payload["components"].append({
-                "component_id": result['component_id'],
-                "status": result['status'],
-                "detected": result['detected'],
-                "edge_density": result['edge_density'],
-                "difference": result['difference']
-            })
-            if not result['detected']:
-                all_present = False
-        
-        payload["overall_result"] = "PASS" if all_present else "FAIL"
-        
-        # Send to API
+
+        # ---- 4️⃣ Initialize and log ----
+        if not self.logger:
+            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_TOP")
+
+        self.logger.log_step("TOP Inspection Analysis", overall_result)
+        self.logger.log_payload(payload)
+
+        # ---- 5️⃣ Send to server ----
         try:
-            response = requests.post(
-                "http://127.0.0.1:5000/submit_top_process",
-                json=payload,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                QMessageBox.information(self, "API Success", 
-                                       "TOP process submitted successfully!\n\n"
-                                       "Ready to start BOTTOM process.")
-                self.submit_top_button.setEnabled(False)
+            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONTOP"
+            response = requests.post(api_url, json=payload, timeout=5)
+
+            if response.status_code in (200, 201):
+                QMessageBox.information(
+                    self,
+                    "TOP Submitted",
+                    f"✅ TOP process submitted successfully!\nStatus: {overall_result}"
+                )
                 self.top_completed = True
+                self.submit_top_button.setEnabled(False)
                 self.start_bottom_button.setEnabled(True)
-                print(f"✅ TOP process submitted: {payload['overall_result']}")
+                self.logger.log_step("Submit TOP", "PASS", {"response": response.status_code})
+                self.logger.set_final_status(overall_result)
+                print(f"✅ TOP submitted to server → {overall_result}")
+
             else:
-                QMessageBox.critical(self, "API Error", 
-                                   f"Failed to submit TOP process: {response.status_code}")
+                QMessageBox.warning(
+                    self,
+                    "API Error",
+                    f"⚠️ Server returned {response.status_code}: {response.text}"
+                )
+                self.logger.log_step("Submit TOP", "FAIL", {"response": response.status_code})
+
         except requests.ConnectionError:
-            QMessageBox.critical(self, "Connection Error", 
-                               "Could not connect to API server.")
+            QMessageBox.critical(self, "Connection Error", "Could not reach API server.")
+            self.logger.log_step("Submit TOP", "FAIL", {"reason": "Connection Error"})
+
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Submission error: {e}")
+            QMessageBox.critical(self, "Error", f"Unexpected error: {e}")
+            self.logger.log_step("Submit TOP", "FAIL", {"exception": str(e)})
     
     def start_bottom_process(self):
         """Start BOTTOM process"""
@@ -1099,43 +1183,50 @@ class DualProcessInspectionWindow(QWidget):
         # Perform analysis on captured frame
         processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
         try:
-            result_data = self.camera_thread.latest_result if hasattr(self.camera_thread, "latest_result") else None
+            roi_results = self.bottom_results  # populated by SobelBottom
+            if not roi_results or not isinstance(roi_results, dict):
+                print("[WARN] No valid results returned from BOTTOM detector.")
+                self.bottom_status_label.setText("Status: ERROR ⚠️")
+                self.bottom_status_label.setStyleSheet("font-weight: bold; color: #f39c12;")
+                return
 
-            if result_data and "results" in result_data:
-                roi_results = result_data["results"]
-                all_pass = True
+            all_pass = True
 
-                # Update UI component labels
-                for i, (roi_name, status) in enumerate(roi_results.items()):
-                    label_text = f"Component {i+1}: {status}"
-                    color = "#27ae60" if status.upper() == "PASS" else "#e74c3c"
-                    self.bottom_component_labels[i].setText(label_text)
-                    self.bottom_component_labels[i].setStyleSheet(
+            # Update UI labels for Screw and Plate
+            for name, status in roi_results.items():
+                label_text = f"{name}: {status}"
+                color = "#27ae60" if status.upper() == "PASS" else "#e74c3c"
+
+                # Handle dynamic lookup (Screw, Plate)
+                if name in self.bottom_component_labels:
+                    self.bottom_component_labels[name].setText(label_text)
+                    self.bottom_component_labels[name].setStyleSheet(
                         f"color: {color}; padding: 3px; font-weight: bold;"
                     )
-                    if status.upper() != "PASS":
-                        all_pass = False
-
-                # Update overall TOP status
-                if all_pass:
-                    self.bottom_status_label.setText("Status: PASS ✅")
-                    self.bottom_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
                 else:
-                    self.bottom_status_label.setText("Status: FAIL ❌")
-                    self.bottom_status_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+                    print(f"[WARN] Unknown bottom label: {name}")
 
+                if status.upper() != "PASS":
+                    all_pass = False
+
+            # Update overall bottom status
+            if all_pass:
+                self.bottom_status_label.setText("Status: PASS ✅")
+                self.bottom_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
             else:
-                print("[WARN] No valid results returned from TOP detector.")
-                self.top_status_label.setText("Status: ERROR ⚠️")
-                self.top_status_label.setStyleSheet("font-weight: bold; color: #f39c12;")
+                self.bottom_status_label.setText("Status: FAIL ❌")
+                self.bottom_status_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+
+            # Enable Submit button after analysis
+            self.capture_bottom_button.setEnabled(False)
+            self.submit_bottom_button.setEnabled(True)
+
+            print(f"✅ Inline BOTTOM analysis complete → {roi_results}")
 
         except Exception as e:
-            print(f"[ERROR] Failed to update status labels: {e}")
+            print(f"[ERROR] Failed to update BOTTOM results: {e}")
             self.bottom_status_label.setText("Status: ERROR ⚠️")
             self.bottom_status_label.setStyleSheet("font-weight: bold; color: #f39c12;")
-    
-        # Force display of analyzed frame
-        self.update_processed_feed(self.captured_frame, processed, concatenated)
         """Capture and analyze BOTTOM frame"""
       
     '''   

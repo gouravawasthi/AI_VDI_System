@@ -99,9 +99,9 @@ class ImageInspectionPipeline:
             color = (0, 0, 255)
             status = "FAIL"
 
-            if roi_name in ['roi1', 'roi2']:
+            if roi_name in ['Antenna', 'Capacitor']:
                 status = self.analyze_ocr(roi)
-            elif roi_name == 'roi3':
+            elif roi_name == 'Speaker':
                 status = self.analyze_circle(roi)
 
             color = (0, 255, 0) if status == "PASS" else (0, 0, 255)
