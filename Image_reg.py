@@ -29,23 +29,46 @@ class ImageRegistration:
 
         if des1 is None or des2 is None:
             raise ValueError("Failed to extract features from one or both images.")
-
+        
         matches = self.bf.match(des1, des2)
         matches = sorted(matches, key=lambda x: x.distance)
         good = matches[:self.good_match_limit]
+        if len(matches)<500:
+            print(f"[WARN] Low feature matches: {len(matches)}. Returning black frame.")
+            return None
 
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
 
         H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-        return H
+        if H is None:
+            print("[WARN] Homography computation failed (matrix is None).")
+            return None
 
+        return H
     def register(self, ref_img, inp_img):
         """
         Warp input image to match reference.
         Returns registered image and homography matrix.
         """
-        H = self.compute_homography(ref_img, inp_img)
-        h, w, _ = ref_img.shape
-        registered = cv2.warpPerspective(inp_img, H, (w, h))
-        return registered
+        try:
+            H = self.compute_homography(ref_img, inp_img)
+
+            # Return black image if homography fails
+            if H is None:
+                black = np.zeros_like(inp_img)
+                cv2.putText(black, "Registration Failed", (40, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                return black
+
+            h, w, _ = ref_img.shape
+            registered = cv2.warpPerspective(inp_img, H, (w, h))
+            return registered
+
+        except Exception as e:
+            print(f"[ERROR] Registration exception: {e}")
+            black = np.zeros_like(inp_img)
+            cv2.putText(black, "Registration Error", (40, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            return black
+    

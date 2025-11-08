@@ -1,178 +1,203 @@
-# server.py
-from flask import Flask, jsonify,request
+# FILE: server_script.py (Full CRUD API - Dynamic Table Handling)
+
 import sqlite3
 import os
-import datetime
-import json
+from flask import Flask, jsonify, request
+
+# --- Configuration ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
+DATA_DIR = os.path.join(BASE_DIR, "data", "db") 
+DB_FILE = os.path.join(DATA_DIR, "inspection_data.db")
+print("DB_FILE:", DB_FILE)
 
 app = Flask(__name__)
-DB_PATH = "inspection.db"
 
-def query_db(query, args=(), one=False):
-    conn = sqlite3.connect(DB_PATH)
+# Define valid tables and their respective primary columns (used for GET/POST structure checks)
+VALID_TABLES = {
+    'CHIPINSPECTION': ['Barcode', 'DT', 'Process_id', 'Station_ID', 'PASS_FAIL'],
+    'INLINEINSPECTIONBOTTOM': ['Barcode', 'DT', 'Process_id', 'Station_ID', 'Antenna', 'Capacitor', 'Speaker', 'Result', 'ManualAntenna', 'ManualCapacitor', 'ManualSpeaker', 'ManualResult'],
+    'INLINEINSPECTIONTOP': ['Barcode', 'DT', 'Process_id', 'Station_ID', 'Screw', 'Plate', 'Result', 'ManualScrew', 'ManualPlate', 'ManualResult'],
+    'EOLTINSPECTION': ['Barcode', 'DT', 'Process_id', 'Station_ID', 'Upper', 'Lower', 'Left', 'Right', 'Result', 'Printtext', 'Barcodetext', 'ManualUpper', 'ManualLower', 'ManualLeft', 'ManualRight', 'ManualResult'],
+}
+
+# --- Database Helper Functions ---
+
+def get_db_connection():
+    """Connects to the SQLite database."""
+    if not os.path.exists(DB_FILE):
+        return None
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error:
+        return None
+
+def execute_db_command(query, params=()):
+    """Executes a non-SELECT query (INSERT, UPDATE, DELETE) and commits."""
+    conn = get_db_connection()
+    if conn is None:
+        return 0, "Database connection failed."
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        rows_affected = cursor.rowcount
+        conn.close()
+        return rows_affected, "Success"
+    except sqlite3.Error as e:
+        conn.close()
+        return 0, str(e)
+
+# --- Flask Dynamic Route ---
+
+@app.route('/api/<string:table_name>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def dynamic_handler(table_name):
+    """Handles CRUD operations dynamically based on the table name in the URL."""
+    # 1. Validate Table Name
+    table = table_name.upper()
+    if table not in VALID_TABLES:
+        return jsonify({"error": f"Invalid table name: {table_name}. Valid tables are: {', '.join(VALID_TABLES.keys())}"}), 400
+
+    # 2. Handle HTTP Methods
+    if not os.path.exists(DB_FILE):
+        return jsonify({"error": "Database file not found. Run automation script first."}), 500
+
+    if request.method == 'GET':
+        return dynamic_get(table)
+    elif request.method == 'POST':
+        return dynamic_post(table)
+    elif request.method == 'PUT':
+        return dynamic_put(table)
+    elif request.method == 'DELETE':
+        return dynamic_delete(table)
+    
+    return jsonify({"error": "Method not allowed."}), 405
+
+
+# --- Dynamic CRUD Handlers ---
+
+def dynamic_get(table_name):
+    """
+    GET: Retrieve records.
+    If 'barcode' is provided, return ONLY the latest record by DT.
+    Otherwise, return the latest 100 records.
+    """
+    barcode = request.args.get('barcode')
+    
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"error": "Database connection failed."}), 500
+
     cursor = conn.cursor()
-    cursor.execute(query, args)
+    
+    if barcode:
+        # Latest record logic
+        query = f"SELECT * FROM {table_name} WHERE Barcode = ? ORDER BY DT DESC LIMIT 1"
+        cursor.execute(query, (barcode,))
+    else:
+        # Latest 100 records
+        query = f"SELECT * FROM {table_name} ORDER BY DT DESC LIMIT 100" 
+        cursor.execute(query)
+    
     rows = cursor.fetchall()
     conn.close()
-    return (rows[0] if rows else None) if one else rows
-
-@app.route('/validate/<barcode_id>', methods=['GET'])
-def validate(barcode_id):
-    """Check if barcode exists, duplicate, and inspection status"""
     
-    # 1️⃣ Check if barcode already has an inspection record (duplicate check)
-    duplicate_check = query_db("""
-        SELECT c.barcode_id, c.status,
-               d.front, d.back, d.right_side, d.left_side, d.top, d.down,d.station
-        FROM checked_table AS c
-        INNER JOIN inspection_details AS d
-        ON c.barcode_id = d.barcode_id
-        WHERE c.barcode_id = ?
-        ORDER BY d.SessionId DESC LIMIT 1;
-    """, (barcode_id,), one=True)
+    data = [dict(row) for row in rows]
+    
+    if barcode and not data:
+         return jsonify({"message": f"No record found in {table_name} for Barcode: {barcode}"}), 404
+         
+    return jsonify({"table": table_name, "count": len(data), "data": data})
 
-    if duplicate_check is not None:
-        # Extract existing data
-        status = duplicate_check[1]  # column 1 = c.status
+def dynamic_post(table_name):
+    """POST: Create/Insert a new record."""
+    data = request.get_json()
+    if not data or 'Barcode' not in data or 'DT' not in data:
+        return jsonify({"error": "Missing required fields ('Barcode' or 'DT') in request body."}), 400
 
-        # Prepare detailed inspection info
-        inspection_data = {
-            "front": duplicate_check[2],
-            "back": duplicate_check[3],
-            "right_side": duplicate_check[4],
-            "left_side": duplicate_check[5],
-            "top": duplicate_check[6],
-            "down": duplicate_check[7],
-            "station":duplicate_check[8]  # New station column,
-        }
+    all_columns = VALID_TABLES[table_name]
+    
+    # Prepare placeholders and values based on the table's schema
+    placeholders = ', '.join(['?'] * len(all_columns))
+    column_names = ', '.join(all_columns)
+    
+    # Map data to columns, defaulting missing values to None (for TEXT/DATETIME) or 0 (for INTEGER/BOOLEAN)
+    values = []
+    for col in all_columns:
+        # Simple heuristic for defaulting: 0 for typically integer fields, None for others
+        default_val = 0 if 'ID' in col or 'PASS' in col or 'FAIL' in col or 'RESULT' in col or 'MANUAL' in col or col in ['Upper', 'Lower', 'Left', 'Right', 'Screw', 'Plate', 'Antenna', 'Capacitor', 'Speaker'] else None
+        
+        # Override default_val to 0 if the column is NOT NULL but we don't have enough info here (safer to use 0)
+        
+        # Use provided value or default value
+        values.append(data.get(col, default_val))
 
-        return jsonify({
-            "barcode_id": barcode_id,
-            "exists": True,
-            "status": status,
-            "message": "Barcode already inspected. Duplicate entry not allowed.",
-            "inspection_details": inspection_data
-        }), 401
+    query = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
+    
+    rows_affected, status = execute_db_command(query, values)
+    
+    if rows_affected > 0:
+        return jsonify({"message": f"Record created successfully in {table_name}.", "barcode": data['Barcode']}), 201
+    else:
+        return jsonify({"error": f"Failed to insert record: {status}"}), 500
 
-    # 2️⃣ Check if barcode exists in main table
-    row = query_db("SELECT status FROM checked_table WHERE barcode_id = ?", (barcode_id,), one=True)
-    if not row:
-        return jsonify({
-            "exists": False,
-            "message": "Barcode not found in database."
-        }), 404
+def dynamic_put(table_name):
+    """PUT: Update an existing record, requires Barcode in payload."""
+    data = request.get_json()
+    barcode = data.get('Barcode')
+    
+    if not barcode:
+        return jsonify({"error": "Missing 'Barcode' for update operation."}), 400
+        
+    set_clauses = []
+    update_values = []
+    
+    # Use the table's columns, excluding Barcode
+    update_fields = [c for c in VALID_TABLES[table_name] if c != 'Barcode']
+    
+    for field in update_fields:
+        if field in data:
+            set_clauses.append(f"{field} = ?")
+            update_values.append(data[field])
 
-    # 3️⃣ Check if previously failed
-    failed_check = query_db("""
-        SELECT 1 FROM checked_table 
-        WHERE barcode_id = ? AND status = 'FAIL'
-    """, (barcode_id,), one=True)
+    if not set_clauses:
+        return jsonify({"message": "No fields provided for update."}), 200
 
-    status = row[0]
+    # Note: This updates ALL records with that barcode.
+    query = f"UPDATE {table_name} SET {', '.join(set_clauses)} WHERE Barcode = ?"
+    update_values.append(barcode)
+    
+    rows_affected, status = execute_db_command(query, update_values)
+    
+    if rows_affected > 0:
+        return jsonify({"message": f"Record(s) updated successfully in {table_name}.", "barcode": barcode}), 200
+    elif "no such table" in status:
+        return jsonify({"error": status}), 500
+    else:
+        return jsonify({"message": f"No record found or updated for Barcode: {barcode} in {table_name}"}), 404
 
-    if failed_check is not None:
-        return jsonify({
-            "barcode_id": barcode_id,
-            "exists": True,
-            "status": status,
-            "valid": False,
-            "message": "Barcode previously failed inspection."
-        }), 409  # Conflict
+def dynamic_delete(table_name):
+    """DELETE: Delete a record, requires Barcode in query parameter."""
+    barcode = request.args.get('barcode')
+    
+    if not barcode:
+        return jsonify({"error": "Missing 'barcode' query parameter for delete operation."}), 400
 
-    # 4️⃣ Otherwise, valid for inspection
-    return jsonify({
-        "barcode_id": barcode_id,
-        "exists": True,
-        "status": status,
-        "valid": True,
-        "message": "Barcode is valid for inspection."
-    }), 200
-LOG_DIR = "logs"  # Folder to store logs
+    query = f"DELETE FROM {table_name} WHERE Barcode = ?"
+    rows_affected, status = execute_db_command(query, (barcode,))
+    
+    if rows_affected > 0:
+        return jsonify({"message": f"Record(s) deleted successfully from {table_name}.", "barcode": barcode}), 200
+    elif "no such table" in status:
+        return jsonify({"error": status}), 500
+    else:
+        return jsonify({"message": f"No record found to delete for Barcode: {barcode} in {table_name}"}), 404
 
-# Create log directory if it doesn't exist
-os.makedirs(LOG_DIR, exist_ok=True)
+# --- Run Server ---
 
-def execute_db(query, args=()):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(query, args)
-    conn.commit()
-    conn.close()
-@app.route("/receive_log", methods=["POST"])
-def receive_log():
-    """Receive inspection JSON log and update database accordingly."""
-    data = request.get_json(force=True)
-    barcode_id = data.get("barcode_id")
-    log_type = data.get("type", 0)
-    steps = data.get("steps", [])
-    final_status = data.get("final_status", "PENDING")
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if not barcode_id:
-        return jsonify({"error": "Missing barcode_id"}), 400
-
-    try:
-        # --- Prepare inspection summary fields ---
-        side_results = {s["step"].lower(): s["result"] for s in steps}
-        front = side_results.get("front", None)
-        back = side_results.get("back", None)
-        left_side = side_results.get("left", None)
-        right_side = side_results.get("right", None)
-        top = side_results.get("top", None)
-        down = side_results.get("bottom", None)
-        station =data.get("station",None)
-
-        # 1️⃣ TYPE = 1 (replace recent record for same barcode)
-        if log_type == 1:
-            print(f"🔁 Replacing last record for barcode {barcode_id}")
-            execute_db(
-                """
-                DELETE FROM inspection_details
-                WHERE rowid = (
-                    SELECT rowid FROM inspection_details
-                    WHERE barcode_id = ?
-                    ORDER BY rowid DESC
-                    LIMIT 1
-                )
-                """,
-                (barcode_id,)
-            )
-            execute_db(
-                """
-                INSERT INTO inspection_details 
-                (SessionID,barcode_id, front, back, left_side, right_side, top, down,station)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?,?)
-                """,
-                (timestamp,barcode_id, front, back, left_side, right_side, top, down,station)
-            )
-            return jsonify({
-                "message": f"Inspection record replaced for {barcode_id}",
-                "type": log_type,
-                "status": final_status
-            }), 200
-        elif log_type in [0, 2]:
-        # 2️⃣ TYPE = 0 or 2 (append new entry)
-            print(f"📝 Inserting new record for barcode {barcode_id} [type={log_type}]")
-            execute_db(
-                """
-                INSERT INTO inspection_details 
-                (SessionID,barcode_id, front, back, left_side, right_side, top, down,station)
-                VALUES (?, ?, ?, ?, ?, ?, ?,?,?)
-                """,
-                (timestamp,barcode_id, front, back, left_side, right_side, top, down,station)
-            )
-
-            return jsonify({
-                "message": f"Inspection record updated for {barcode_id}",
-                "type": log_type,
-                "status": final_status
-            }), 200
-
-    except Exception as e:
-        print(f"❌ Database update error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------- MAIN ----------------------
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+if __name__ == '__main__':
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+        
+    app.run(debug=True, host='127.0.0.1', port=5000)
