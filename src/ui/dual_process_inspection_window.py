@@ -196,9 +196,9 @@ class CameraThread(QThread):
                 # --- BOTTOM Process ---
                 elif self.parent.current_process == "BOTTOM" and self.bottom_detector:
                     try:
-                        result = self.bottom_detector.run(
-                            reference_img_path=self.parent.bottom_ref,
-                            input_img=frame,
+                        result = self.bottom_detector.analyze_roi(
+                            ref_img=self.reference_images.get("Bottom"),
+                            inp_img=frame,
                             roi_definitions=self.bottom_rois
                         )
                         overlay = result["annotated"]
@@ -437,17 +437,17 @@ class DualProcessInspectionWindow(QWidget):
         control_group.setLayout(control_layout)
         
         # Process 1 - TOP
-        self.start_top_button = QPushButton("Start TOP Process")
+        self.start_top_button = QPushButton("Start BOTTOM Process")
         self.start_top_button.clicked.connect(self.start_top_process)
         self.start_top_button.setEnabled(False)
         control_layout.addWidget(self.start_top_button)
         
-        self.capture_top_button = QPushButton("Capture TOP")
+        self.capture_top_button = QPushButton("Capture BOTTOM")
         self.capture_top_button.clicked.connect(self.capture_top)
         self.capture_top_button.setEnabled(False)
         control_layout.addWidget(self.capture_top_button)
       
-        self.submit_top_button = QPushButton("Submit TOP")
+        self.submit_top_button = QPushButton("Submit BOTTOM")
         self.submit_top_button.clicked.connect(self.submit_top_to_api)
         self.submit_top_button.setEnabled(False)
         self.submit_top_button.setStyleSheet("background-color: #FF9800;")
@@ -459,17 +459,17 @@ class DualProcessInspectionWindow(QWidget):
         control_layout.addWidget(separator)
         
         # Process 2 - BOTTOM
-        self.start_bottom_button = QPushButton("Start BOTTOM Process")
+        self.start_bottom_button = QPushButton("Start TOP Process")
         self.start_bottom_button.clicked.connect(self.start_bottom_process)
         self.start_bottom_button.setEnabled(False)
         control_layout.addWidget(self.start_bottom_button)
         
-        self.capture_bottom_button = QPushButton("Capture BOTTOM")
+        self.capture_bottom_button = QPushButton("Capture TOP")
         self.capture_bottom_button.clicked.connect(self.capture_bottom)
         self.capture_bottom_button.setEnabled(False)
         control_layout.addWidget(self.capture_bottom_button)
         
-        self.submit_bottom_button = QPushButton("Submit BOTTOM")
+        self.submit_bottom_button = QPushButton("Submit TOP")
         self.submit_bottom_button.clicked.connect(self.submit_bottom_to_api)
         self.submit_bottom_button.setEnabled(False)
         self.submit_bottom_button.setStyleSheet("background-color: #FF9800;")
@@ -883,6 +883,7 @@ class DualProcessInspectionWindow(QWidget):
         """Start TOP process"""
         self.current_process = "TOP"
         self.camera_active = True
+        self.show_processed=False
         
         if not self.camera_thread.running:
             if not self.camera_thread.start_camera(0):
@@ -912,6 +913,9 @@ class DualProcessInspectionWindow(QWidget):
         
         # Freeze frame
         self.captured_frame = frame.copy()
+        # Stop continuous updates — freeze live feed
+        self.camera_thread.running = False
+
 
         # Perform analysis on captured frame
         processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
@@ -1044,11 +1048,89 @@ class DualProcessInspectionWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Processing Error", f"Error during frame averaging or streaming:\n{e}")
             '''
+    def complete_inspection(self):
+        """Mark the current inspection as complete and reset for a new part."""
+        try:
+            # --- 1️⃣ Ensure both sides are completed ---
+            if not (self.top_completed and self.bottom_completed):
+                QMessageBox.warning(self, "Incomplete Process",
+                                    "Please complete both TOP and BOTTOM inspections first.")
+                return
+
+            # --- 2️⃣ Compute final result ---
+            overall_text = self.overall_result.text().replace("Overall: ", "")
+            final_status = "PASS ✅" if "PASS" in overall_text else "FAIL ❌"
+
+            # --- 3️⃣ Display confirmation ---
+            QMessageBox.information(
+                self,
+                "Inspection Complete",
+                f"Inspection completed successfully!\n\nFinal Status: {final_status}\n\n"
+                "You can now start a new inspection."
+            )
+
+            print(f"✅ COMPLETE INSPECTION → {final_status}")
+
+            # --- 4️⃣ Log completion ---
+            if self.logger:
+                self.logger.log_step("Inspection Complete", final_status)
+                self.logger.set_final_status(final_status)
+
+            # --- 5️⃣ Reset all states for new inspection ---
+            self.top_completed = False
+            self.bottom_completed = False
+            self.top_results.clear()
+            self.bottom_results.clear()
+            self.barcode = ""
+
+            # Reset UI
+            self.camera_label.setText("Ready for next inspection.\n\nScan new barcode to begin.")
+            self.camera_label.setStyleSheet("""
+                background-color: #2c3e50; 
+                color: white; 
+                font-size: 18px; 
+                border-radius: 8px;
+            """)
+            self.camera_thread.stop_camera()
+
+            self.top_status_label.setText("Status: Not Started")
+            self.top_status_label.setStyleSheet("font-weight: bold; color: #666;")
+
+            self.bottom_status_label.setText("Status: Not Started")
+            self.bottom_status_label.setStyleSheet("font-weight: bold; color: #666;")
+
+            for lbl in self.top_component_labels.values():
+                lbl.setText("Pending")
+                lbl.setStyleSheet("color: #666; padding: 3px;")
+
+            for lbl in self.bottom_component_labels:
+                lbl.setText("Pending")
+                lbl.setStyleSheet("color: #666; padding: 3px;")
+
+            self.overall_result.setText("Overall: Pending")
+            self.overall_result.setStyleSheet("color: #2c3e50; margin: 10px;")
+
+            # Enable barcode entry again
+            self.start_top_button.setEnabled(False)
+            self.start_bottom_button.setEnabled(False)
+            self.capture_top_button.setEnabled(False)
+            self.capture_bottom_button.setEnabled(False)
+            self.submit_top_button.setEnabled(False)
+            self.submit_bottom_button.setEnabled(False)
+            self.submit_barcode_button.setEnabled(True)
+            self.barcode_input.setEnabled(True)
+            self.barcode_display.setText("No barcode entered")
+
+            print("🔁 System reset: Ready for new barcode.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Reset Error", f"Error while completing inspection: {e}")
+            print(f"[ERROR] complete_inspection failed: {e}")
 
     
     def submit_top_to_api(self):
         """Submit TOP inspection results to the new dynamic API."""
-        from logger import JSONLogger
+        from LOGGERINLINE import JSONLogger
 
         if not self.top_results or not isinstance(self.top_results, dict):
             QMessageBox.warning(self, "No Data", "No valid TOP results to submit.")
@@ -1093,14 +1175,14 @@ class DualProcessInspectionWindow(QWidget):
 
         # ---- 4️⃣ Initialize and log ----
         if not self.logger:
-            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_TOP")
+            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_BOTTOM")
 
         self.logger.log_step("TOP Inspection Analysis", overall_result)
         self.logger.log_payload(payload)
 
         # ---- 5️⃣ Send to server ----
         try:
-            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONTOP"
+            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONBOTTOM"
             response = requests.post(api_url, json=payload, timeout=5)
 
             if response.status_code in (200, 201):
@@ -1133,9 +1215,10 @@ class DualProcessInspectionWindow(QWidget):
             self.logger.log_step("Submit TOP", "FAIL", {"exception": str(e)})
     
     def start_bottom_process(self):
-        """Start BOTTOM process"""
+        """Start  process"""
         self.current_process = "BOTTOM"
         self.camera_active = True
+        self.show_processed=False
         
         if not self.camera_thread.running:
             if not self.camera_thread.start_camera(0):
@@ -1155,6 +1238,9 @@ class DualProcessInspectionWindow(QWidget):
     
     def capture_bottom(self):
         """Capture current frame and perform analysis"""
+        # Stop continuous updates — freeze live feed
+    
+
         self.show_processed = True
 
         # Capture the latest frame from camera
@@ -1165,6 +1251,8 @@ class DualProcessInspectionWindow(QWidget):
         
         # Freeze frame
         self.captured_frame = frame.copy()
+        self.camera_thread.running = False
+
 
         # Perform analysis on captured frame
         processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
@@ -1297,16 +1385,16 @@ class DualProcessInspectionWindow(QWidget):
 
         # ---- 4️⃣ Initialize logger if missing ----
         if not self.logger:
-            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_BOTTOM")
+            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_TOP")
 
         # Update logger for bottom process
-        self.logger.process_name = "INLINE_INSPECTION_BOTTOM"
+        self.logger.process_name = "INLINE_INSPECTION_TOP"
         self.logger.log_step("BOTTOM Inspection Analysis", overall_result)
         self.logger.log_payload(payload)
 
         # ---- 5️⃣ Send payload to server ----
         try:
-            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONBOTTOM"
+            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONTOP"
             response = requests.post(api_url, json=payload, timeout=5)
 
             if response.status_code in (200, 201):
@@ -1325,6 +1413,7 @@ class DualProcessInspectionWindow(QWidget):
 
                 # Update overall inspection result
                 self.calculate_overall_result()
+                self.complete_inspection()
 
             else:
                 QMessageBox.warning(
@@ -1341,7 +1430,9 @@ class DualProcessInspectionWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Unexpected error: {e}")
             self.logger.log_step("Submit BOTTOM", "FAIL", {"exception": str(e)})
+       
 
+       
     
     def calculate_overall_result(self):
         """Calculate and display overall inspection result"""
