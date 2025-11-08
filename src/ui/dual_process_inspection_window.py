@@ -760,26 +760,23 @@ class DualProcessInspectionWindow(QWidget):
             QMessageBox.information(self, "Success", "Barcode validated! Ready to start TOP process.")
     
     def validate_barcode(self, barcode):
-        """Validate barcode against the new dynamic API (CHIPINSPECTION)."""
+        """Validate barcode using new CHIPINSPECTION API."""
         import requests
-        from LOGGERINLINE import JSONLogger  # Local import to avoid circular dependency
-        self.logger = JSONLogger(self.barcode, self.station)
+        from LOGGERINLINE import JSONLogger
+        self.logger = JSONLogger(barcode_id=barcode, station=self.station, process_name="INLINE_INSPECTION_TOP")
 
         api_url = "http://127.0.0.1:5000/api/CHIPINSPECTION"
         try:
-            # --- Step 1: Query barcode record ---
             response = requests.get(f"{api_url}?barcode={barcode}", timeout=5)
 
-            # --- Case 1: No record found (New barcode) ---
             if response.status_code == 404:
                 print(f"[INFO] New barcode detected: {barcode}")
+                self.logger.log_step("Barcode Validation", "PASS", {"reason": "New barcode"})
                 return True
 
-            # --- Case 2: Record exists (Duplicate) ---
             elif response.status_code == 200:
                 data = response.json()
                 records = data.get("data", [])
-
                 if records:
                     latest = records[0]
                     info_text = (
@@ -787,15 +784,13 @@ class DualProcessInspectionWindow(QWidget):
                         f"<b>Process ID:</b> {latest.get('Process_id', '-')}"
                     )
 
-                    # --- Create Dialog ---
                     dialog = QDialog(self)
                     dialog.setWindowTitle("Duplicate Barcode Found")
                     layout = QVBoxLayout(dialog)
                     label = QLabel(info_text)
-                    label.setTextFormat(1)  # Allow HTML
+                    label.setTextFormat(1)
                     layout.addWidget(label)
 
-                    # Buttons
                     append_btn = QPushButton("Append")
                     update_btn = QPushButton("Update")
                     cancel_btn = QPushButton("Cancel")
@@ -803,7 +798,6 @@ class DualProcessInspectionWindow(QWidget):
                     layout.addWidget(update_btn)
                     layout.addWidget(cancel_btn)
 
-                    # Button handlers
                     def append_action(): dialog.done(1)
                     def update_action(): dialog.done(2)
                     def cancel_action(): dialog.done(0)
@@ -813,40 +807,32 @@ class DualProcessInspectionWindow(QWidget):
 
                     result = dialog.exec_()
 
-                    # --- Interpret user choice ---
                     if result == 1:
-                        print("[VALIDATE] User chose to APPEND data.")
                         self.logger.set_type(1)
+                        self.logger.log_step("Barcode Validation", "PASS", {"mode": "append"})
                         return True
                     elif result == 2:
-                        print("[VALIDATE] User chose to UPDATE existing record.")
                         self.logger.set_type(2)
+                        self.logger.log_step("Barcode Validation", "PASS", {"mode": "update"})
                         return True
                     else:
-                        print("[VALIDATE] User cancelled operation.")
+                        self.logger.log_step("Barcode Validation", "SKIPPED", {"mode": "cancel"})
                         return False
-
                 else:
-                    # API returned 200 but no data
                     return True
-
-            # --- Case 3: Unexpected API behavior ---
             else:
-                QMessageBox.warning(
-                    self, "Validation Failed",
-                    f"Unexpected response from server ({response.status_code})"
-                )
+                QMessageBox.warning(self, "Validation Failed", f"Unexpected response: {response.status_code}")
+                self.logger.log_step("Barcode Validation", "FAIL", {"code": response.status_code})
                 return False
 
         except requests.ConnectionError:
-            QMessageBox.critical(
-                self, "Connection Error",
-                "Could not connect to API server at http://127.0.0.1:5000"
-            )
+            QMessageBox.critical(self, "Connection Error", "Could not connect to API server.")
+            self.logger.log_step("Barcode Validation", "FAIL", {"reason": "Connection Error"})
             return False
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Validation exception: {e}")
+            QMessageBox.critical(self, "Error", f"Validation error: {e}")
+            self.logger.log_step("Barcode Validation", "FAIL", {"reason": str(e)})
             return False
     def stop_inspection(self):
         """Stop the current inspection and reset the state."""
@@ -1265,61 +1251,97 @@ class DualProcessInspectionWindow(QWidget):
             QMessageBox.warning(self, "Detector Error", "BOTTOM detector not initialized.")
         '''
     def submit_bottom_to_api(self):
-        """Submit BOTTOM results to API and complete inspection"""
-        if not self.bottom_results:
-            QMessageBox.warning(self, "No Data", "No BOTTOM results to submit.")
+        """Submit BOTTOM inspection results to the new dynamic API."""
+        from logger import JSONLogger
+
+        if not self.bottom_results or not isinstance(self.bottom_results, dict):
+            QMessageBox.warning(self, "No Data", "No valid BOTTOM results to submit.")
             return
-        
-        # Prepare payload
+
+        # ---- 1️⃣ Extract result statuses ----
+        plate_status = self.bottom_results.get("Plate", "FAIL")
+        screw_status = self.bottom_results.get("Screw", "FAIL")
+
+        auto_pass = all(s == "PASS" for s in [plate_status, screw_status])
+        overall_result = "PASS" if auto_pass else "FAIL"
+
+        # ---- 2️⃣ Handle manual override ----
+        manual_enabled = self.manual_override_checkbox.isChecked()
+
+        if manual_enabled:
+            print("[INFO] Manual override enabled for BOTTOM inspection.")
+            # You can reuse top dropdowns or add separate ones later
+            manual_plate = self.manual_fields["Antenna"].currentText()  # TEMP: reuse existing combo
+            manual_screw = self.manual_fields["Capacitor"].currentText()  # TEMP: reuse existing combo
+            manual_pass = all(s == "PASS" for s in [manual_plate, manual_screw])
+        else:
+            manual_plate = None
+            manual_screw = None
+            manual_pass = auto_pass
+
+        manual_result = "PASS" if manual_pass else "FAIL"
+
+        # ---- 3️⃣ Construct API payload ----
         payload = {
-            "barcode_id": self.barcode,
-            "station": self.station,
-            "process": "BOTTOM",
-            "timestamp": datetime.now().isoformat(),
-            "components": []
+            "Barcode": self.barcode,
+            "DT": datetime.now().isoformat(),
+            "Process_id": 2,  # INLINE process
+            "Station_ID": self.station,
+            "Plate": 1 if plate_status == "PASS" else 0,
+            "Screw": 1 if screw_status == "PASS" else 0,
+            "Result": 1 if auto_pass else 0,
+            "ManualPlate": 1 if manual_plate == "PASS" else 0,
+            "ManualScrew": 1 if manual_screw == "PASS" else 0,
+            "ManualResult": 1 if manual_result == "PASS" else 0
         }
-        
-        all_present = True
-        for result in self.bottom_results:
-            payload["components"].append({
-                "component_id": result['component_id'],
-                "status": result['status'],
-                "detected": result['detected'],
-                "edge_density": result['edge_density'],
-                "difference": result['difference']
-            })
-            if not result['detected']:
-                all_present = False
-        
-        payload["overall_result"] = "PASS" if all_present else "FAIL"
-        
-        # Send to API
+
+        # ---- 4️⃣ Initialize logger if missing ----
+        if not self.logger:
+            self.logger = JSONLogger(self.barcode, self.station, "INLINE_INSPECTION_BOTTOM")
+
+        # Update logger for bottom process
+        self.logger.process_name = "INLINE_INSPECTION_BOTTOM"
+        self.logger.log_step("BOTTOM Inspection Analysis", overall_result)
+        self.logger.log_payload(payload)
+
+        # ---- 5️⃣ Send payload to server ----
         try:
-            response = requests.post(
-                "http://127.0.0.1:5000/submit_bottom_process",
-                json=payload,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
+            api_url = "http://127.0.0.1:5000/api/INLINEINSPECTIONBOTTOM"
+            response = requests.post(api_url, json=payload, timeout=5)
+
+            if response.status_code in (200, 201):
+                QMessageBox.information(
+                    self,
+                    "BOTTOM Submitted",
+                    f"✅ BOTTOM process submitted successfully!\nStatus: {overall_result}"
+                )
                 self.submit_bottom_button.setEnabled(False)
                 self.bottom_completed = True
-                
-                # Calculate overall result
+
+                # Mark completion in logs
+                self.logger.log_step("Submit BOTTOM", "PASS", {"response": response.status_code})
+                self.logger.set_final_status(overall_result)
+                print(f"✅ BOTTOM submitted → {overall_result}")
+
+                # Update overall inspection result
                 self.calculate_overall_result()
-                
-                QMessageBox.information(self, "Inspection Complete", 
-                                       "BOTTOM process submitted successfully!\n\n"
-                                       "Full inspection complete.")
-                print(f"✅ BOTTOM process submitted: {payload['overall_result']}")
+
             else:
-                QMessageBox.critical(self, "API Error", 
-                                   f"Failed to submit BOTTOM process: {response.status_code}")
+                QMessageBox.warning(
+                    self,
+                    "API Error",
+                    f"⚠️ Server returned {response.status_code}: {response.text}"
+                )
+                self.logger.log_step("Submit BOTTOM", "FAIL", {"response": response.status_code})
+
         except requests.ConnectionError:
-            QMessageBox.critical(self, "Connection Error", 
-                               "Could not connect to API server.")
+            QMessageBox.critical(self, "Connection Error", "Could not reach API server.")
+            self.logger.log_step("Submit BOTTOM", "FAIL", {"reason": "Connection Error"})
+
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Submission error: {e}")
+            QMessageBox.critical(self, "Error", f"Unexpected error: {e}")
+            self.logger.log_step("Submit BOTTOM", "FAIL", {"exception": str(e)})
+
     
     def calculate_overall_result(self):
         """Calculate and display overall inspection result"""

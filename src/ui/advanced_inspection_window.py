@@ -784,8 +784,82 @@ class AdvancedInspectionWindow(QWidget):
                                "Barcode was rejected in previous process. Inspection cannot proceed.")'''
         
     def validate_barcode(self, barcode):
-        """Validate barcode with Flask + SQLite backend"""
+        """Validate barcode against the new dynamic API (CHIPINSPECTION)."""
         import requests
+        from LOGGERINLINE import JSONLogger
+        self.logger = JSONLogger(barcode_id=barcode, station=self.station, process_name="INLINE_INSPECTION_TOP")
+        
+        api_url = "http://127.0.0.1:5000/api/CHIPINSPECTION"
+        try:
+            response = requests.get(f"{api_url}?barcode={barcode}", timeout=5)
+
+            if response.status_code == 404:
+                print(f"[INFO] New barcode detected: {barcode}")
+                self.logger.log_step("Barcode Validation", "PASS", {"reason": "New barcode"})
+                return True
+
+            elif response.status_code == 200:
+                data = response.json()
+                records = data.get("data", [])
+                if records:
+                    latest = records[0]
+                    info_text = (
+                        f"<b>Barcode:</b> {latest.get('Barcode', barcode)}<br>"
+                        f"<b>Process ID:</b> {latest.get('Process_id', '-')}"
+                    )
+
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("Duplicate Barcode Found")
+                    layout = QVBoxLayout(dialog)
+                    label = QLabel(info_text)
+                    label.setTextFormat(1)
+                    layout.addWidget(label)
+
+                    append_btn = QPushButton("Append")
+                    update_btn = QPushButton("Update")
+                    cancel_btn = QPushButton("Cancel")
+                    layout.addWidget(append_btn)
+                    layout.addWidget(update_btn)
+                    layout.addWidget(cancel_btn)
+
+                    def append_action(): dialog.done(1)
+                    def update_action(): dialog.done(2)
+                    def cancel_action(): dialog.done(0)
+                    append_btn.clicked.connect(append_action)
+                    update_btn.clicked.connect(update_action)
+                    cancel_btn.clicked.connect(cancel_action)
+
+                    result = dialog.exec_()
+
+                    if result == 1:
+                        self.logger.set_type(1)
+                        self.logger.log_step("Barcode Validation", "PASS", {"mode": "append"})
+                        return True
+                    elif result == 2:
+                        self.logger.set_type(2)
+                        self.logger.log_step("Barcode Validation", "PASS", {"mode": "update"})
+                        return True
+                    else:
+                        self.logger.log_step("Barcode Validation", "SKIPPED", {"mode": "cancel"})
+                        return False
+                else:
+                    return True
+            else:
+                QMessageBox.warning(self, "Validation Failed", f"Unexpected response: {response.status_code}")
+                self.logger.log_step("Barcode Validation", "FAIL", {"code": response.status_code})
+                return False
+
+        except requests.ConnectionError:
+            QMessageBox.critical(self, "Connection Error", "Could not connect to API server.")
+            self.logger.log_step("Barcode Validation", "FAIL", {"reason": "Connection Error"})
+            return False
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Validation error: {e}")
+            self.logger.log_step("Barcode Validation", "FAIL", {"reason": str(e)})
+            return False
+
+        """
         from logger import JSONLogger  # Local import to avoid circular dependency
         self.logger = JSONLogger(self.barcode,self.station) # Local import to avoid circular dependency
         try:
@@ -868,13 +942,14 @@ class AdvancedInspectionWindow(QWidget):
             return False
         
     '''def validate_barcode(self, barcode):
-        """Validate barcode with server API"""
+        Validate barcode with server API
         try:
             # Mock validation
             return not barcode.endswith('0')
         except Exception as e:
             print(f"API validation error: {e}")
-            return False'''
+            return False''' 
+            """
     
     def start_inspection(self):
         """Triggered when Start Inspection is clicked"""
