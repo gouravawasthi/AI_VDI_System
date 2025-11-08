@@ -1051,34 +1051,7 @@ class DualProcessInspectionWindow(QWidget):
     def complete_inspection(self):
         """Mark the current inspection as complete and reset for a new part."""
         try:
-            # --- 1️⃣ Ensure both sides are completed ---
-            if not (self.top_completed and self.bottom_completed):
-                QMessageBox.warning(self, "Incomplete Process",
-                                    "Please complete both TOP and BOTTOM inspections first.")
-                return
-
-            # --- 2️⃣ Compute final result ---
-            overall_text = self.overall_result.text().replace("Overall: ", "")
-            final_status = "PASS ✅" if "PASS" in overall_text else "FAIL ❌"
-
-            # --- 3️⃣ Display confirmation ---
-            QMessageBox.information(
-                self,
-                "Inspection Complete",
-                f"Inspection completed successfully!\n\nFinal Status: {final_status}\n\n"
-                "You can now start a new inspection."
-            )
-
-            print(f"✅ COMPLETE INSPECTION → {final_status}")
-
-            # --- 4️⃣ Log completion ---
-            if self.logger:
-                self.logger.log_step("Inspection Complete", final_status)
-                self.logger.set_final_status(final_status)
-
-            # --- 5️⃣ Reset all states for new inspection ---
-            self.top_completed = False
-            self.bottom_completed = False
+        
             self.top_results.clear()
             self.bottom_results.clear()
             self.barcode = ""
@@ -1256,6 +1229,7 @@ class DualProcessInspectionWindow(QWidget):
 
         # Perform analysis on captured frame
         processed, concatenated = self.camera_thread.process_frame(self.captured_frame)
+        self.update_processed_feed(self.captured_frame, processed, concatenated)
         try:
             roi_results = self.bottom_results  # populated by SobelBottom
             if not roi_results or not isinstance(roi_results, dict):
@@ -1414,6 +1388,7 @@ class DualProcessInspectionWindow(QWidget):
                 # Update overall inspection result
                 self.calculate_overall_result()
                 self.complete_inspection()
+                self.back_to_main()
 
             else:
                 QMessageBox.warning(
@@ -1428,7 +1403,7 @@ class DualProcessInspectionWindow(QWidget):
             self.logger.log_step("Submit BOTTOM", "FAIL", {"reason": "Connection Error"})
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Unexpected error: {e}")
+            self.back_to_main()
             self.logger.log_step("Submit BOTTOM", "FAIL", {"exception": str(e)})
        
 
