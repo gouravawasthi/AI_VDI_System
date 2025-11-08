@@ -1,5 +1,5 @@
 """
-Main application window for AI VDI System
+Main application window for AI VDI System - Updated with Dual Process Inspection
 """
 
 import sys
@@ -15,10 +15,12 @@ class MainWindow(QMainWindow):
     
     # Define signals
     start_inspection = pyqtSignal()
+    start_inline_inspection = pyqtSignal()
     
     def __init__(self):
         super().__init__()
         self.inspection_window = None
+        self.inline_inspection_window = None
         self.init_ui()
     
     def init_ui(self):
@@ -42,6 +44,12 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover {
                 background-color: #45a049;
+            }
+            QPushButton#inlineButton {
+                background-color: #2196F3;
+            }
+            QPushButton#inlineButton:hover {
+                background-color: #0b7dda;
             }
             QPushButton#quitButton {
                 background-color: #f44336;
@@ -175,15 +183,26 @@ class MainWindow(QMainWindow):
         # Add spacer to center buttons
         buttons_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
         
-        # Start button
-        self.start_button = QPushButton("Start Inspection")
+        # Start Inspection button (original 6-sided inspection)
+        self.start_button = QPushButton("Start Inspection\n(6-Sided)")
         self.start_button.setMinimumSize(250, 80)
-        self.start_button.setFont(QFont("Arial", 18, QFont.Bold))
+        self.start_button.setFont(QFont("Arial", 16, QFont.Bold))
         self.start_button.clicked.connect(self.on_start_clicked)
         buttons_layout.addWidget(self.start_button)
         
         # Add spacer between buttons
-        buttons_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Fixed, QSizePolicy.Minimum))
+        buttons_layout.addItem(QSpacerItem(30, 20, QSizePolicy.Fixed, QSizePolicy.Minimum))
+        
+        # Start Inline Inspection button (NEW - dual process)
+        self.start_inline_button = QPushButton("Start Inspection Inline\n(Top/Bottom Components)")
+        self.start_inline_button.setObjectName("inlineButton")
+        self.start_inline_button.setMinimumSize(250, 80)
+        self.start_inline_button.setFont(QFont("Arial", 16, QFont.Bold))
+        self.start_inline_button.clicked.connect(self.on_start_inline_clicked)
+        buttons_layout.addWidget(self.start_inline_button)
+        
+        # Add spacer between buttons
+        buttons_layout.addItem(QSpacerItem(30, 20, QSizePolicy.Fixed, QSizePolicy.Minimum))
         
         # Quit button
         self.quit_button = QPushButton("Quit")
@@ -219,9 +238,9 @@ class MainWindow(QMainWindow):
             return None
     
     def on_start_clicked(self):
-        """Handle start button click"""
+        """Handle start button click - Original 6-sided inspection"""
         self.start_inspection.emit()
-        print("Start Inspection clicked")
+        print("Start Inspection (6-Sided) clicked")
         
         # Import and launch advanced inspection window
         from .advanced_inspection_window import AdvancedInspectionWindow
@@ -232,10 +251,29 @@ class MainWindow(QMainWindow):
         # Hide main window
         self.hide()
     
+    def on_start_inline_clicked(self):
+        """Handle start inline button click - NEW Dual Process Inspection"""
+        self.start_inline_inspection.emit()
+        print("Start Inspection Inline (Top/Bottom Components) clicked")
+        
+        # Import and launch dual process inspection window
+        from .dual_process_inspection_window import DualProcessInspectionWindow
+        self.inline_inspection_window = DualProcessInspectionWindow(self)
+        self.inline_inspection_window.window_closed.connect(self.show_main_window_inline)
+        self.inline_inspection_window.show()
+        
+        # Hide main window
+        self.hide()
+    
     def show_main_window(self):
-        """Show main window when inspection window is closed"""
+        """Show main window when 6-sided inspection window is closed"""
         self.show()
         self.inspection_window = None
+    
+    def show_main_window_inline(self):
+        """Show main window when inline inspection window is closed"""
+        self.show()
+        self.inline_inspection_window = None
     
     def on_quit_clicked(self):
         """Handle quit button click"""
@@ -243,7 +281,11 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle application close event"""
-        # TODO: Cleanup resources
+        # Cleanup resources
+        if self.inspection_window:
+            self.inspection_window.close()
+        if self.inline_inspection_window:
+            self.inline_inspection_window.close()
         event.accept()
 
 
